@@ -1,65 +1,111 @@
-import Image from "next/image";
+"use client";
+
+import { useAuth } from "@/src/contexts/AuthContext";
+import Link from "next/link";
 
 export default function Home() {
-  return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-10 h-10 rounded-full border-4 border-indigo-200 border-t-indigo-600 animate-spin" />
+          <p className="text-sm text-slate-500">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (user) {
+    const dashboard = user.role === "admin" ? "/admin/dashboard" : "/student/dashboard";
+    return (
+      <div className="flex-1 flex items-center justify-center p-6">
+        <div className="content-card max-w-md w-full text-center animate-fade-in">
+          <div className="w-20 h-20 rounded-full bg-indigo-100 mx-auto mb-4 flex items-center justify-center text-indigo-600 text-2xl font-bold">
+            {user.full_name.charAt(0).toUpperCase()}
+          </div>
+          <h1 className="text-xl font-semibold text-slate-900 mb-1">
+            Welcome, {user.full_name}
           </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+          <p className="text-sm text-slate-500 mb-2">
+            Logged in as <span className="font-medium text-slate-700 capitalize">{user.role}</span>
           </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+          {user.registered_photo && (
+            <img
+              src={user.registered_photo}
+              alt="Registered photo"
+              className="w-24 h-24 object-cover rounded-full mx-auto mb-4 border-2 border-slate-200 shadow-sm"
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+          )}
+          <Link
+            href={dashboard}
+            className="btn-primary inline-block mt-2"
           >
-            Documentation
-          </a>
+            Go to Dashboard
+          </Link>
         </div>
-      </main>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-1 flex">
+      <div className="flex-1 flex flex-col items-center justify-center p-6 text-center">
+        <div className="max-w-lg animate-fade-in">
+          <div className="w-16 h-16 rounded-2xl bg-indigo-600 flex items-center justify-center text-white text-2xl font-bold mx-auto mb-6 shadow-lg shadow-indigo-200">
+            V
+          </div>
+          <h1 className="text-4xl sm:text-5xl font-bold tracking-tight text-slate-900 mb-4">
+            Vision<span className="text-indigo-600">Proctor</span>
+          </h1>
+          <p className="text-lg text-slate-500 mb-8 leading-relaxed">
+            AI-Powered Proctored Exam System with real-time face detection,
+            gaze tracking, and suspicious activity monitoring.
+          </p>
+          <div className="flex items-center justify-center gap-4">
+            <Link href="/login" className="btn-primary text-base !py-3 !px-8">
+              Login
+            </Link>
+            <Link href="/register" className="btn-secondary text-base !py-3 !px-8">
+              Register
+            </Link>
+          </div>
+          <div className="mt-12 grid grid-cols-3 gap-6 text-center">
+            <div>
+              <div className="text-2xl font-bold text-indigo-600">AI</div>
+              <div className="text-xs text-slate-400 mt-1">Powered</div>
+            </div>
+            <div>
+              <div className="text-2xl font-bold text-indigo-600">Live</div>
+              <div className="text-xs text-slate-400 mt-1">Proctoring</div>
+            </div>
+            <div>
+              <div className="text-2xl font-bold text-indigo-600">Secure</div>
+              <div className="text-xs text-slate-400 mt-1">Exams</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className="hidden lg:flex flex-1 bg-gradient-to-br from-indigo-50 via-white to-slate-50 items-center justify-center p-12">
+        <div className="max-w-sm space-y-6">
+          <div className="content-card p-6 card-hover">
+            <div className="w-10 h-10 rounded-lg bg-indigo-100 flex items-center justify-center text-indigo-600 mb-3">1</div>
+            <h3 className="font-semibold text-slate-900 mb-1">Admin Creates Exam</h3>
+            <p className="text-sm text-slate-500">Set up MCQ exams with questions, options, and correct answers.</p>
+          </div>
+          <div className="content-card p-6 card-hover">
+            <div className="w-10 h-10 rounded-lg bg-emerald-100 flex items-center justify-center text-emerald-600 mb-3">2</div>
+            <h3 className="font-semibold text-slate-900 mb-1">Student Takes Exam</h3>
+            <p className="text-sm text-slate-500">Camera stays on throughout with AI proctoring monitoring.</p>
+          </div>
+          <div className="content-card p-6 card-hover">
+            <div className="w-10 h-10 rounded-lg bg-amber-100 flex items-center justify-center text-amber-600 mb-3">3</div>
+            <h3 className="font-semibold text-slate-900 mb-1">Review Reports</h3>
+            <p className="text-sm text-slate-500">Admin reviews suspicion scores, alerts, and evidence.</p>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

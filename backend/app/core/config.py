@@ -4,6 +4,10 @@ from pathlib import Path
 class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql://postgres:password@localhost:5432/proctor_db"
     JWT_SECRET: str = "your-secret-key"
+    JWT_ALGORITHM: str = "HS256"
+    JWT_ACCESS_EXPIRE_MINUTES: int = 30
+    JWT_REFRESH_EXPIRE_DAYS: int = 7
+    UPLOAD_DIR: str = "uploads"
     DEBUG: bool = True
 
     model_config = SettingsConfigDict(
