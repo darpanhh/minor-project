@@ -185,10 +185,17 @@ async def proctor_ws(
             except json.JSONDecodeError:
                 logger.warning("Proctor WS: received invalid JSON from session %s", session_uuid)
                 continue
+            except (WebSocketDisconnect, RuntimeError) as e:
+                if isinstance(e, RuntimeError) and "disconnect" not in str(e).lower():
+                    logger.warning("Proctor WS: error reading frame for session %s: %s", session_uuid, e)
+                    continue
+                raise
             except Exception as e:
                 logger.warning("Proctor WS: error reading or decoding frame for session %s: %s", session_uuid, e)
                 continue
 
+            print(f"Frame received from session {session_uuid}: shape={frame.shape}")
+            logger.info("Proctor WS: received frame from session %s (shape: %s)", session_uuid, frame.shape)
             result = detector.process_frame(str(session_uuid), frame)
 
             # --- State tracking for warning-first logic ---
@@ -224,10 +231,13 @@ async def proctor_ws(
                 base_msg = ""
                 if r == "phone_detected":
                     base_msg = "Mobile phone detected."
+                    print("[DETECTOR] Mobile phone detected.")
                 elif r == "multiple_persons":
                     base_msg = "Multiple persons detected in frame."
+                    print("[DETECTOR] Multiple persons detected in frame.")
                 elif r == "person_absent":
                     base_msg = "No person detected in frame."
+                    print("[DETECTOR] No person detected in frame.")
 
                 if active_duration < 4.0:
                     # Within warning grace period: warn on-screen, DO NOT log to DB
@@ -301,8 +311,11 @@ async def proctor_ws(
             result["snapshot_reasons"] = confirmed_snapshot_reasons
             await websocket.send_json(result)
 
-    except WebSocketDisconnect:
-        logger.info("Proctor WS disconnected for session %s", session_uuid)
+    except (WebSocketDisconnect, RuntimeError) as e:
+        if isinstance(e, RuntimeError) and "disconnect" not in str(e).lower():
+            logger.exception("Proctoring WS error for session %s", session_uuid)
+        else:
+            logger.info("Proctor WS disconnected for session %s", session_uuid)
         detector.end_session(str(session_uuid))
     except Exception:
         logger.exception("Proctoring WS error for session %s", session_uuid)

@@ -1,8 +1,7 @@
+import bcrypt
 from app.core.database import SessionLocal
 from app.models.user import User, UserRole
-from passlib.context import CryptContext
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def seed_admin():
     db = SessionLocal()
@@ -14,7 +13,7 @@ def seed_admin():
     admin = User(
         full_name="Admin",
         email="admin@visionproctor.com",
-        password_hash=pwd_context.hash("admin123"),
+        password_hash=bcrypt.hashpw(b"admin123", bcrypt.gensalt()).decode(),
         role=UserRole.admin,
         student_id=None,
     )

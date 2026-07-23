@@ -48,6 +48,9 @@ export default function ProctoringMonitor({
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
+  const onAlertRef = useRef(onAlert);
+  onAlertRef.current = onAlert;
+  const connectRef = useRef<(() => void) | null>(null);
 
   const [connected, setConnected] = useState(false);
   const [alerts, setAlerts] = useState<Alert[]>([]);
@@ -190,7 +193,7 @@ export default function ProctoringMonitor({
               alertsRef.current = [alert, ...alertsRef.current].slice(0, 30);
               setAlerts([...alertsRef.current]);
             }
-            onAlert?.(alert);
+            onAlertRef.current?.(alert);
           }
         } catch {
           // ignore parse errors
@@ -209,12 +212,14 @@ export default function ProctoringMonitor({
         reconnectTimerRef.current = setTimeout(connectFn, delay);
       }
     }
-  }, [buildUrl, drawOverlay, onAlert]);
+  }, [buildUrl, drawOverlay]);
+
+  connectRef.current = connect;
 
   useEffect(() => {
     mountedRef.current = true;
     reconnectAttemptRef.current = 0;
-    connect();
+    connectRef.current?.();
 
     return () => {
       mountedRef.current = false;
@@ -231,7 +236,7 @@ export default function ProctoringMonitor({
         wsRef.current = null;
       }
     };
-  }, [connect]);
+  }, []);
 
   useEffect(() => {
     if (wsError || fatalError) return;

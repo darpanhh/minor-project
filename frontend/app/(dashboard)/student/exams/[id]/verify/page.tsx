@@ -2,7 +2,29 @@
 
 import { useState, useEffect } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { Button } from "@/components/ui/button";
+// Local fallback Button to avoid missing import during verification
+function Button({
+  children,
+  className = "",
+  size,
+  disabled,
+  onClick,
+}: React.PropsWithChildren<{
+  className?: string;
+  size?: string;
+  disabled?: boolean;
+  onClick?: () => void;
+}>) {
+  return (
+    <button
+      className={`btn ${className}`}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  );
+}
 
 interface CheckItem {
   id: string;
@@ -127,7 +149,7 @@ export default function VerifyPage() {
           className="w-full"
           size="lg"
           disabled={!allComplete}
-          onClick={() => router.push(`/student/exams/${params.examId}`)}
+          onClick={() => router.push(`/student/exams/${params.id}`)}
         >
           <span>Start Exam</span>
           <span className="material-symbols-outlined ml-2">arrow_forward</span>

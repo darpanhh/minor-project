@@ -27,3 +27,5 @@ Thumbs.db
 # Project specific ignores
 backend/yolov8n.pt
 backend/uploads/
+backend/.venv/
+frontend/.next/

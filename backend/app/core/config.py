@@ -1,19 +1,21 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
 
 class Settings(BaseSettings):
-    DATABASE_URL: str = "postgresql://postgres:password@localhost:5432/proctor_db"
-    JWT_SECRET: str = "your-secret-key"
+    DATABASE_URL: str
+    JWT_SECRET: str
+
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_EXPIRE_MINUTES: int = 30
     JWT_REFRESH_EXPIRE_DAYS: int = 7
     UPLOAD_DIR: str = "uploads"
-    DEBUG: bool = True
+
+    DEBUG: bool = False
 
     model_config = SettingsConfigDict(
-        env_file=str(Path(__file__).resolve().parent.parent.parent / ".env"),
-        env_file_encoding="utf-8",
-        extra="ignore"
+        env_file=Path(__file__).resolve().parent.parent.parent / ".env",
+        extra="ignore",
     )
 
 settings = Settings()

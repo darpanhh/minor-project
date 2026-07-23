@@ -8,10 +8,9 @@ from app.auth.jwt_handler import create_access_token, create_refresh_token, veri
 from app.auth.dependencies import get_current_user
 from app.models.user import User, UserRole
 from app.schemas.user_schema import UserRegister, UserLogin, UserOut, UserRegisterResponse
-from passlib.context import CryptContext
+import bcrypt
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 @router.post("/register", response_model=UserRegisterResponse, status_code=status.HTTP_201_CREATED)
@@ -39,7 +38,7 @@ def register(
     user = User(
         full_name=full_name,
         email=email,
-        password_hash=pwd_context.hash(password),
+        password_hash=bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode(),
         student_id=student_id,
         registered_photo=photo_path,
         role=UserRole.student,
@@ -59,7 +58,7 @@ def register(
 @router.post("/login")
 def login(payload: UserLogin, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == payload.email).first()
-    if not user or not pwd_context.verify(payload.password, user.password_hash):
+    if not user or not bcrypt.checkpw(payload.password.encode(), user.password_hash.encode()):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
 
     token_data = {"sub": str(user.id), "role": user.role.value}
