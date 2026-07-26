@@ -1,0 +1,168 @@
+import math
+import logging
+
+logger = logging.getLogger(__name__)
+
+_METRIC_KEYS = [
+    "left_horizontal",
+    "right_horizontal",
+    "left_vertical",
+    "right_vertical",
+    "yaw",
+    "pitch",
+    "roll",
+]
+
+_GAZE_ZONES = [
+    "top_left", "top_center", "top_right",
+    "middle_left", "center", "middle_right",
+    "bottom_left", "bottom_center", "bottom_right",
+]
+
+_DEFAULT_WEIGHTS = {
+    "left_horizontal": 0.20,
+    "right_horizontal": 0.20,
+    "left_vertical": 0.12,
+    "right_vertical": 0.12,
+    "yaw": 0.20,
+    "pitch": 0.12,
+    "roll": 0.04,
+}
+
+
+class GazeEstimator:
+    """
+    Compares current eye/head features against a stored calibration profile
+    to estimate where the student is looking.
+
+    The comparison uses a weighted Euclidean distance across all 7 metrics.
+    The closest calibration point (lowest distance) is selected as the
+    predicted gaze target.
+
+    This class is stateless — all smoothing/violation tracking should be
+    handled by the caller (GazeService).
+    """
+
+    def __init__(self, weights: dict[str, float] | None = None):
+        self.weights = weights or dict(_DEFAULT_WEIGHTS)
+
+    def compare(self, calibration_profile: dict, current_features: dict) -> dict:
+        """
+        Compute weighted distance to every stored calibration point.
+
+        Parameters
+        ----------
+        calibration_profile : dict
+            { point_name: { left_horizontal: ..., right_horizontal: ..., ... } }
+        current_features : dict
+            { left_horizontal: ..., right_horizontal: ..., yaw: ..., etc. }
+
+        Returns
+        -------
+        dict
+            {
+                "point": "center",           # closest calibration point
+                "confidence": 0.87,           # [0, 1]
+                "distances": { point: dist, ... },
+                "all_scores": [ { point, distance, confidence }, ... ]
+            }
+        """
+        distances: dict[str, float] = {}
+
+        for point_name, point_data in calibration_profile.items():
+            if point_name not in _GAZE_ZONES:
+                continue
+
+            diff_sum = 0.0
+            total_weight = 0.0
+
+            for key, weight in self.weights.items():
+                expected = point_data.get(key)
+                actual = current_features.get(key)
+                if expected is not None and actual is not None:
+                    diff = actual - expected
+                    diff_sum += weight * diff * diff
+                    total_weight += weight
+
+            if total_weight > 0:
+                distances[point_name] = math.sqrt(diff_sum / total_weight)
+            else:
+                distances[point_name] = float("inf")
+
+        if not distances:
+            return {
+                "point": "unknown",
+                "confidence": 0.0,
+                "distances": {},
+                "all_scores": [],
+            }
+
+        best_point = min(distances, key=distances.get)
+        best_dist = distances[best_point]
+
+        all_scores = []
+        for pn, d in sorted(distances.items(), key=lambda x: x[1]):
+            c = self._distance_to_confidence(d)
+            all_scores.append({"point": pn, "distance": d, "confidence": c})
+
+        confidence = self._distance_to_confidence(best_dist)
+
+        logger.debug(
+            "GazeEstimator: point=%s dist=%.4f conf=%.3f",
+            best_point, best_dist, confidence,
+        )
+
+        return {
+            "point": best_point,
+            "confidence": confidence,
+            "distances": distances,
+            "all_scores": all_scores,
+        }
+
+    def compare_unsafe(self, current_features: dict) -> dict | None:
+        """
+        Estimate gaze direction without calibration using raw head pose thresholds.
+        Returns a coarse zone (center / left / right / up / down) or None.
+        Used only when no calibration profile is available.
+        """
+        yaw = current_features.get("yaw")
+        pitch = current_features.get("pitch")
+
+        if yaw is None or pitch is None:
+            return None
+
+        zone = "center"
+
+        if yaw > 20:
+            zone = "middle_left"
+        elif yaw < -20:
+            zone = "middle_right"
+
+        if pitch > 15:
+            if zone == "center":
+                zone = "top_center"
+            elif zone == "middle_left":
+                zone = "top_left"
+            elif zone == "middle_right":
+                zone = "top_right"
+        elif pitch < -15:
+            if zone == "center":
+                zone = "bottom_center"
+            elif zone == "middle_left":
+                zone = "bottom_left"
+            elif zone == "middle_right":
+                zone = "bottom_right"
+
+        return {
+            "point": zone,
+            "confidence": 0.5,
+            "distances": {},
+            "all_scores": [],
+        }
+
+    @staticmethod
+    def _distance_to_confidence(distance: float) -> float:
+        if distance == float("inf"):
+            return 0.0
+        c = math.exp(-distance * 2.5)
+        return max(0.0, min(1.0, c))

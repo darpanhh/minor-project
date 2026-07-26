@@ -25,6 +25,12 @@ from app.models.event import ProctoringEvent, EventType
 from app.proctoring.detector import ProctorDetector
 from app.services.suspicion_engine import evaluate_and_alert
 
+from app.proctoring.gaze.calibration import CalibrationProcessor
+from app.proctoring.gaze.gaze_service import GazeService
+from app.models.calibration import Calibration
+
+calibration_processor = CalibrationProcessor()
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -96,6 +102,25 @@ def _persist_event(
     except Exception:
         db.rollback()
         logger.exception("Failed to persist proctoring event")
+
+
+def _load_calibration(gaze_service: GazeService, session_uuid: uuid.UUID) -> None:
+    """Load calibration profile from DB into the gaze service (best-effort)."""
+    try:
+        db = SessionLocal()
+        try:
+            cal = db.query(Calibration).filter(
+                Calibration.exam_session_id == session_uuid
+            ).first()
+            if cal and cal.profile and cal.completed:
+                gaze_service.load_calibration(cal.profile)
+                logger.info("Gaze: loaded calibration for session %s", session_uuid)
+            else:
+                logger.info("Gaze: no calibration profile for session %s (ok)", session_uuid)
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning("Gaze: failed to load calibration for session %s: %s", session_uuid, e)
 
 
 @router.websocket("/ws/proctor/{session_id}")
@@ -171,6 +196,10 @@ async def proctor_ws(
     # reason -> {"first_seen": timestamp, "last_seen": timestamp, "confirmed": bool, "logged_once": bool, "last_log_time": timestamp}
     violation_states: dict[str, dict] = {}
 
+    # ── Initialise gaze/head tracking with this session's calibration ──
+    gaze_service = GazeService()
+    _load_calibration(gaze_service, session_uuid)
+
     try:
         while True:
             try:
@@ -197,6 +226,13 @@ async def proctor_ws(
             print(f"Frame received from session {session_uuid}: shape={frame.shape}")
             logger.info("Proctor WS: received frame from session %s (shape: %s)", session_uuid, frame.shape)
             result = detector.process_frame(str(session_uuid), frame)
+
+            # ── Gaze/head-pose pipeline (additive, does NOT affect YOLO) ──
+            gaze_result = gaze_service.process_frame(frame)
+            logger.debug("Gaze: status=%s point=%s conf=%.3f",
+                         gaze_result.get("status", "?"),
+                         gaze_result.get("predicted_point", "?"),
+                         gaze_result.get("confidence", 0.0))
 
             # --- State tracking for warning-first logic ---
             now_ts = datetime.now().timestamp()
@@ -302,13 +338,32 @@ async def proctor_ws(
                             
                             _persist_event(db, session_uuid, etype, conf, snapshot_url)
                     
-                    # Evaluate and trigger alerts in the suspicion engine
                     evaluate_and_alert(db, session_uuid)
                 finally:
                     db.close()
 
+            # ── Persist gaze/head events (completely additive) ──────────
+            gaze_events = gaze_service.get_pending_events()
+            if gaze_events:
+                db_gaze = SessionLocal()
+                try:
+                    for ev in gaze_events:
+                        _persist_event(db_gaze, session_uuid, ev["event_type"], ev["confidence"], None)
+                        logger.info(
+                            "Gaze event: %s (conf=%.2f dur=%.1fs)",
+                            ev["violation_type"], ev["confidence"], ev["duration"],
+                        )
+                        result.setdefault("alerts", []).append({
+                            "type": ev["violation_type"],
+                            "message": f"VIOLATION RECORDED: {ev['violation_type'].replace('_', ' ').title()} detected for {ev['duration']:.0f}s.",
+                        })
+                    evaluate_and_alert(db_gaze, session_uuid)
+                finally:
+                    db_gaze.close()
+
             result["snapshots"] = snapshots
             result["snapshot_reasons"] = confirmed_snapshot_reasons
+            result["gaze"] = gaze_result
             await websocket.send_json(result)
 
     except (WebSocketDisconnect, RuntimeError) as e:
@@ -320,4 +375,80 @@ async def proctor_ws(
     except Exception:
         logger.exception("Proctoring WS error for session %s", session_uuid)
         detector.end_session(str(session_uuid))
+
+
+# ── Calibration WebSocket (separate from proctoring) ─────────────────
+
+
+@router.websocket("/ws/proctor/calibration/{session_id}")
+async def calibration_ws(
+    websocket: WebSocket,
+    session_id: str,
+):
+    """
+    Calibration WebSocket — completely separate from the exam proctoring endpoint.
+
+    Receives calibration frames and logs them. Does NOT run YOLO, does NOT
+    persist anything to the database, and does NOT create snapshots.
+    MediaPipe processing will be added here later.
+    """
+    await websocket.accept()
+    print(f"[Calibration] WS connected for session {session_id}")
+    logger.info("Calibration WS connected for session %s", session_id)
+
+    db = SessionLocal()
+    try:
+        session_exists = db.query(ExamSession).filter(
+            ExamSession.id == session_id
+        ).first()
+        if not session_exists:
+            await websocket.send_json({"error": "Session not found"})
+            await websocket.close(code=4004)
+            return
+    finally:
+        db.close()
+
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            payload = json.loads(raw)
+            point = payload.get("point", "unknown")
+            frame_number = payload.get("frame_number", 0)
+            frame_data = payload.get("frame", "")
+
+            if not frame_data:
+                continue
+
+            frame = _decode_frame(frame_data)
+            if frame is None:
+                continue
+
+            result = calibration_processor.process(frame, point, frame_number, session_id)
+
+            if not result["success"]:
+                await websocket.send_json(result)
+                continue
+            
+            print(f"[Calibration] Point={point} Frame={frame_number} Shape=({frame.shape[0]},{frame.shape[1]},{frame.shape[2]})")
+            logger.info(
+                "Calibration: Point=%s Frame=%d Shape=(%d,%d,%d)",
+                point,
+                frame_number,
+                frame.shape[0],
+                frame.shape[1],
+                frame.shape[2],
+            )
+
+            await websocket.send_json({
+                "status": "ok",
+                "frame_number": frame_number,
+                "point": point,
+                "landmarks_detected": result["landmark_count"],
+            })
+
+    except (WebSocketDisconnect, RuntimeError):
+        print(f"[Calibration] WS disconnected for session {session_id}")
+        logger.info("Calibration WS disconnected for session %s", session_id)
+    except Exception:
+        logger.exception("Calibration WS error for session %s", session_id)
 

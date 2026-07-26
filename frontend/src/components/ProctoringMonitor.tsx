@@ -14,6 +14,19 @@ interface Alert {
   message: string;
 }
 
+interface GazeData {
+  face_detected: boolean;
+  status: string;
+  predicted_point: string | null;
+  confidence: number;
+  yaw: number | null;
+  pitch: number | null;
+  roll: number | null;
+  violation_active: boolean;
+  violation_type: string | null;
+  violation_duration: number;
+}
+
 interface ProctorResult {
   person_count: number;
   phone_detected: boolean;
@@ -21,6 +34,7 @@ interface ProctorResult {
   alerts: Alert[];
   snapshot_reasons: string[];
   snapshots?: string[];
+  gaze?: GazeData;
 }
 
 const WS_BASE =
@@ -45,6 +59,7 @@ export default function ProctoringMonitor({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const alertsRef = useRef<Alert[]>([]);
+  const gazeRef = useRef<GazeData | null>(null);
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
@@ -54,6 +69,8 @@ export default function ProctoringMonitor({
 
   const [connected, setConnected] = useState(false);
   const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [gazeStatus, setGazeStatus] = useState<string | null>(null);
+  const [gazeAngles, setGazeAngles] = useState<string>("");
   const [wsError, setWsError] = useState(false);
   const [fatalError, setFatalError] = useState<string | null>(null);
 
@@ -83,6 +100,166 @@ export default function ProctoringMonitor({
           y1 > 15 ? y1 - 5 : y1 + 15
         );
       });
+
+      const gaze = gazeRef.current;
+      if (!gaze) return;
+
+      const cw = canvas.width;
+      const ch = canvas.height;
+      const cx = cw / 2;
+      const cy = ch / 2;
+
+      if (!gaze.face_detected) {
+        ctx.fillStyle = "rgba(239,68,68,0.20)";
+        ctx.fillRect(0, 0, cw, ch);
+        ctx.fillStyle = "#ef4444";
+        ctx.font = "bold 18px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("⚠ NO FACE DETECTED", cx, cy);
+        ctx.textAlign = "start";
+        return;
+      }
+
+      const violation = gaze.violation_active;
+      const baseColor = violation ? "#ef4444" : "#22c55e";
+
+      // ── Status badge (top-right) ─────────────────────────────
+      {
+        const statusColor =
+          gaze.status === "normal" ? "#22c55e" :
+          gaze.status === "looking_off_screen" ? "#6b7280" : "#ef4444";
+        ctx.fillStyle = statusColor;
+        ctx.globalAlpha = 0.85;
+        ctx.fillRect(cw - 170, 8, 162, 26);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 13px sans-serif";
+        ctx.fillText(gaze.status.replace(/_/g, " ").toUpperCase(), cw - 162, 27);
+      }
+
+      // ── Head outline (ellipse) ───────────────────────────────
+      ctx.strokeStyle = "rgba(255,255,255,0.15)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, cw * 0.14, ch * 0.30, 0, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // ── Gaze direction arrow + dot ───────────────────────────
+      if (gaze.yaw !== null && gaze.pitch !== null) {
+        // Camera feed is not mirrored (raw), so negate yaw/pitch
+        // so the arrow follows the visual nose/chin movement.
+        const displayYaw = -gaze.yaw;
+        const displayPitch = -gaze.pitch;
+        const scale = Math.max(cw, ch) / 100;
+        const gx = cx + displayYaw * scale;
+        const gy = cy + displayPitch * scale;
+        const clampedGx = Math.max(10, Math.min(cw - 10, gx));
+        const clampedGy = Math.max(10, Math.min(ch - 10, gy));
+
+        // Crosshair at centre
+        ctx.strokeStyle = "rgba(255,255,255,0.20)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 4]);
+        ctx.beginPath();
+        ctx.moveTo(cx - 20, cy); ctx.lineTo(cx + 20, cy);
+        ctx.moveTo(cx, cy - 20); ctx.lineTo(cx, cy + 20);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Arrow shaft (solid line, thicker)
+        ctx.strokeStyle = baseColor;
+        ctx.globalAlpha = 0.7;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(clampedGx, clampedGy);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+
+        // Arrowhead
+        const angle = Math.atan2(clampedGy - cy, clampedGx - cx);
+        const headLen = 12;
+        ctx.fillStyle = baseColor;
+        ctx.beginPath();
+        ctx.moveTo(clampedGx, clampedGy);
+        ctx.lineTo(
+          clampedGx - headLen * Math.cos(angle - 0.4),
+          clampedGy - headLen * Math.sin(angle - 0.4),
+        );
+        ctx.lineTo(
+          clampedGx - headLen * Math.cos(angle + 0.4),
+          clampedGy - headLen * Math.sin(angle + 0.4),
+        );
+        ctx.closePath();
+        ctx.fill();
+
+        // Dot at destination
+        ctx.fillStyle = "#fff";
+        ctx.beginPath();
+        ctx.arc(clampedGx, clampedGy, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = baseColor;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      // ── Looking-at label (top-left, large) ───────────────────
+      {
+        const yaw = gaze.yaw ?? 0;
+        const pitch = gaze.pitch ?? 0;
+        const h =
+          yaw > 8 ? "right" :
+          yaw < -8 ? "left" :
+          "center";
+        const v =
+          pitch > 8 ? "down" :
+          pitch < -8 ? "up" :
+          "center";
+        const zone = h === "center" && v === "center" ? "center" :
+                     v === "center" ? h :
+                     h === "center" ? v :
+                     `${v}_${h}`;
+        const isCenter = zone === "center";
+        ctx.fillStyle = isCenter ? "rgba(34,197,94,0.90)" : "rgba(239,68,68,0.90)";
+        ctx.font = "bold 15px sans-serif";
+        const label = `Looking: ${zone.replace(/_/g, " ")} ${isCenter ? "✓" : "⚠"}`;
+        ctx.fillText(label, 10, 30);
+
+        // Confidence bar
+        const barX = 10;
+        const barY = 40;
+        const barW = 120;
+        const barH = 6;
+        ctx.fillStyle = "rgba(255,255,255,0.20)";
+        ctx.fillRect(barX, barY, barW, barH);
+        ctx.fillStyle = isCenter ? "#22c55e" : "#f59e0b";
+        ctx.fillRect(barX, barY, barW * gaze.confidence, barH);
+        ctx.fillStyle = "rgba(255,255,255,0.60)";
+        ctx.font = "10px sans-serif";
+        ctx.fillText(`${(gaze.confidence * 100).toFixed(0)}%`, barX + barW + 6, barY + 6);
+      }
+
+      // ── Angle readout (bottom-left corner) ───────────────────
+      if (gaze.yaw !== null && gaze.pitch !== null) {
+        ctx.fillStyle = "rgba(255,255,255,0.70)";
+        ctx.font = "12px monospace";
+        const yOff = ch - 60;
+
+        // Direction labels
+        const hDir = gaze.yaw > 5 ? "← LEFT" : gaze.yaw < -5 ? "RIGHT →" : "CENTER";
+        const vDir = gaze.pitch > 5 ? "↑ UP" : gaze.pitch < -5 ? "↓ DOWN" : "—";
+        ctx.font = "bold 13px sans-serif";
+        ctx.fillText(`${hDir}  ${vDir}`, 10, yOff);
+
+        ctx.font = "11px monospace";
+        ctx.fillStyle = "rgba(255,255,255,0.50)";
+        ctx.fillText(
+          `yaw ${gaze.yaw >= 0 ? "+" : ""}${gaze.yaw.toFixed(0)}°  ` +
+          `pitch ${gaze.pitch >= 0 ? "+" : ""}${gaze.pitch.toFixed(0)}°  ` +
+          `roll ${gaze.roll !== null ? (gaze.roll >= 0 ? "+" : "") + gaze.roll.toFixed(0) : "?"}°`,
+          10, yOff + 16,
+        );
+      }
     },
     [videoRef]
   );
@@ -187,6 +364,20 @@ export default function ProctoringMonitor({
           const result = data as ProctorResult;
           drawOverlay(result.detections);
 
+          if (result.gaze) {
+            gazeRef.current = result.gaze;
+            setGazeStatus(result.gaze.status);
+            if (result.gaze.yaw !== null && result.gaze.pitch !== null) {
+              setGazeAngles(
+                `Y${result.gaze.yaw >= 0 ? "+" : ""}${result.gaze.yaw.toFixed(0)} ` +
+                `P${result.gaze.pitch >= 0 ? "+" : ""}${result.gaze.pitch.toFixed(0)} ` +
+                `R${result.gaze.roll !== null ? (result.gaze.roll >= 0 ? "+" : "") + result.gaze.roll.toFixed(0) : "?"}`
+              );
+            } else {
+              setGazeAngles("");
+            }
+          }
+
           for (const alert of result.alerts) {
             const alreadyShown = alertsRef.current.some((a) => a.type === alert.type && a.message === alert.message);
             if (!alreadyShown) {
@@ -284,21 +475,52 @@ export default function ProctoringMonitor({
         />
       </div>
 
-      <div className="mt-2 flex items-center gap-2 text-xs">
+      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
         {fatalError ? (
           <span className="text-red-600">AI Proctor: {fatalError}</span>
         ) : wsError ? (
           <span className="text-yellow-600">AI Proctor unavailable — reconnecting...</span>
         ) : (
           <>
-            <span
-              className={`inline-block w-2 h-2 rounded-full ${
-                connected ? "bg-green-500" : "bg-red-500"
-              }`}
-            />
-            <span className={connected ? "text-green-600" : "text-red-600"}>
-              AI Proctor: {connected ? "Connected" : "Disconnected"}
+            <span className="flex items-center gap-1">
+              <span
+                className={`inline-block w-2 h-2 rounded-full ${
+                  connected ? "bg-green-500" : "bg-red-500"
+                }`}
+              />
+              <span className={connected ? "text-green-600" : "text-red-600"}>
+                AI Proctor: {connected ? "Connected" : "Disconnected"}
+              </span>
             </span>
+
+            {gazeStatus && (() => {
+              const gaze = gazeRef.current;
+              const pt = gaze?.predicted_point;
+              const conf = gaze?.confidence ?? 0;
+              const isNormal = gazeStatus === "normal";
+              return (
+                <>
+                  <span className="flex items-center gap-1">
+                    <span className={`inline-block w-2 h-2 rounded-full ${
+                      isNormal ? "bg-green-500" :
+                      gazeStatus === "looking_off_screen" ? "bg-gray-500" : "bg-red-500"
+                    }`} />
+                    <span className={isNormal ? "text-green-600 font-medium" : "text-red-600 font-medium"}>
+                      {isNormal ? "Normal" : gazeStatus.replace(/_/g, " ")}
+                    </span>
+                  </span>
+                  {pt && (
+                    <span className="text-gray-500">
+                      {pt === "center" ? "Center ✓" : pt.replace(/_/g, " ") + " ⚠"}
+                    </span>
+                  )}
+                  <span className="text-gray-400">{(conf * 100).toFixed(0)}%</span>
+                  {gazeAngles && (
+                    <span className="text-gray-400 font-mono">{gazeAngles}</span>
+                  )}
+                </>
+              );
+            })()}
           </>
         )}
       </div>

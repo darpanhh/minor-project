@@ -56,3 +56,4 @@ class ExamSession(Base):
     proctoring_events = relationship("ProctoringEvent", back_populates="session")
     alerts = relationship("Alert", back_populates="session")
     cheating_logs = relationship("CheatingLog", back_populates="session")
+    calibration = relationship("Calibration", back_populates="exam_session", uselist=False)

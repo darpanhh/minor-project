@@ -35,6 +35,7 @@ export default function TakeExamPage() {
         setExam(e);
         setSession(s);
         if (s.status === "submitted") { router.push(`/student/results?session=${s.id}`); return; }
+        if (s.status === "registered") { router.replace(`/student/exams/${examId}/verify`); return; }
       })
       .catch(console.error)
       .finally(() => setLoading(false));
@@ -133,36 +134,6 @@ export default function TakeExamPage() {
 
   if (error && !session) return <ProtectedRoute role="student"><div className="p-8 text-center text-red-600">{error}</div></ProtectedRoute>;
   if (!exam) return <ProtectedRoute role="student"><div className="p-8 text-center">Exam not found</div></ProtectedRoute>;
-
-  if (session?.status === "registered") {
-    return (
-      <ProtectedRoute role="student">
-        <div className="flex-1 flex items-center justify-center p-6">
-          <div className="content-card max-w-lg w-full text-center animate-fade-in">
-            <h1 className="text-2xl font-bold text-slate-900 mb-2">{exam.title}</h1>
-            <p className="text-sm text-slate-500 mb-6">
-              {exam.questions?.length || 0} questions &middot; {exam.duration_min} minutes
-            </p>
-            <div className="mb-6">
-              <video ref={videoRef} autoPlay playsInline muted className="w-56 h-42 mx-auto rounded-xl bg-black object-cover" />
-              {!cameraActive && <p className="text-sm text-red-600 mt-2">Waiting for camera...</p>}
-            </div>
-            <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 mb-6 text-left">
-              <p className="text-xs text-amber-800 font-medium mb-1">Before you start:</p>
-              <ul className="text-xs text-amber-700 space-y-1">
-                <li className="flex items-center gap-1.5"><span className="w-1 h-1 rounded-full bg-amber-500" /> Camera must stay on throughout</li>
-                <li className="flex items-center gap-1.5"><span className="w-1 h-1 rounded-full bg-amber-500" /> Tab switching is monitored</li>
-                <li className="flex items-center gap-1.5"><span className="w-1 h-1 rounded-full bg-amber-500" /> AI proctoring is active</li>
-              </ul>
-            </div>
-            <button onClick={beginExam} disabled={!cameraActive} className="btn-primary px-8">
-              {cameraActive ? "Start Exam" : "Waiting for camera..."}
-            </button>
-          </div>
-        </div>
-      </ProtectedRoute>
-    );
-  }
 
   if (session?.status === "in_progress") {
     return (
