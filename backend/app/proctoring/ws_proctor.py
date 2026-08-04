@@ -18,6 +18,7 @@ import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from sqlalchemy.orm import Session as DBSession
 
+from app.core.config import settings
 from app.core.database import SessionLocal
 from app.auth.jwt_handler import verify_token
 from app.models.exam import ExamSession
@@ -42,8 +43,14 @@ def get_detector() -> ProctorDetector:
     global _detector
     if _detector is None:
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        model_path = os.path.join(base_dir, "yolov8n.pt")
+        model_path = os.path.join(base_dir, settings.MODEL_PATH)
+        logger.info("Loading proctoring model from: %s", model_path)
         _detector = ProctorDetector(model_path=model_path)
+        logger.info(
+            "Model loaded — person_class_id=%d, phone_class_id=%d",
+            _detector.person_class_id,
+            _detector.phone_class_id,
+        )
     return _detector
 
 
@@ -286,12 +293,13 @@ async def proctor_ws(
                         etype = ALERT_TO_EVENT_TYPE.get(reason)
                         if etype:
                             # Use the highest confidence from matching detections
+                            # Use dynamic class IDs from the loaded model (works with any weights)
                             conf = 0.0
                             target_class = None
                             if reason == "phone_detected":
-                                target_class = 67
+                                target_class = detector.phone_class_id
                             elif reason == "multiple_persons":
-                                target_class = 0
+                                target_class = detector.person_class_id
                             
                             if target_class is not None:
                                 for det in result["detections"]:
