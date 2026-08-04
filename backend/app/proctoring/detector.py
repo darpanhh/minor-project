@@ -1,12 +1,18 @@
 import time
 from dataclasses import dataclass, field
+from typing import Optional
 
 import numpy as np
 from ultralytics import YOLO
 
-# COCO class ids (default YOLO pretrained weights)
-PERSON_CLASS_ID = 0
-PHONE_CLASS_ID = 67  # 'cell phone'
+
+def _find_class_id(names: dict, label: str) -> Optional[int]:
+    """Return the class-id whose name matches *label* (case-insensitive), or None."""
+    label_lower = label.lower()
+    for cls_id, cls_name in names.items():
+        if cls_name.lower() == label_lower:
+            return cls_id
+    return None
 
 
 @dataclass
@@ -26,12 +32,28 @@ class ProctorDetector:
       - multiple people in frame
       - phone in frame
       - candidate missing from frame for too long
+
+    Works with any YOLO weights (pretrained COCO or fine-tuned) by resolving
+    class IDs dynamically from the model's own names dictionary.
     """
 
-    def __init__(self, model_path: str = "yolov8n.pt", conf_threshold: float = 0.45):
+    def __init__(self, model_path: str = "best.pt", conf_threshold: float = 0.45):
         self.model = YOLO(model_path)
         self.conf_threshold = conf_threshold
         self.sessions: dict[str, SessionState] = {}
+
+        # Dynamically resolve class IDs from model labels
+        self.person_class_id: Optional[int] = _find_class_id(self.model.names, "person")
+        self.phone_class_id: Optional[int] = _find_class_id(self.model.names, "cell phone")
+
+        if self.person_class_id is None:
+            raise ValueError(
+                f"Could not find 'person' class in model labels: {self.model.names}"
+            )
+        if self.phone_class_id is None:
+            raise ValueError(
+                f"Could not find 'cell phone' class in model labels: {self.model.names}"
+            )
 
     def get_state(self, session_id: str) -> SessionState:
         if session_id not in self.sessions:
@@ -69,9 +91,9 @@ class ProctorDetector:
                 }
             )
 
-            if cls == PERSON_CLASS_ID:
+            if cls == self.person_class_id:
                 person_count += 1
-            elif cls == PHONE_CLASS_ID:
+            elif cls == self.phone_class_id:
                 phone_detected = True
 
         alerts = []
