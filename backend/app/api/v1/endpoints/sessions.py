@@ -1,3 +1,5 @@
+import base64
+import os
 import uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -5,13 +7,46 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.auth.dependencies import get_current_user, require_role
 from app.models.user import User, UserRole
-from app.models.exam import Exam, ExamSession, SessionStatus
+from app.models.exam import Exam, ExamSession, SessionStatus, ResultStatus
 from app.models.event import ProctoringEvent, EventType, Alert
 from app.schemas.exam_schema import ExamSessionOut
 from app.services.suspicion_engine import evaluate_and_alert
+import cv2
+import numpy as np
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
+
+SNAPSHOT_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "snapshots",
+)
+os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+
+
+def _decode_frame(data_url_or_b64: str) -> np.ndarray | None:
+    """Decode a base64 (or data-URL) string to an OpenCV BGR image."""
+    try:
+        if "," in data_url_or_b64:
+            data_url_or_b64 = data_url_or_b64.split(",", 1)[1]
+        img_bytes = base64.b64decode(data_url_or_b64)
+        arr = np.frombuffer(img_bytes, dtype=np.uint8)
+        return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    except Exception:
+        return None
+
+
+def _save_snapshot(session_id: uuid.UUID, frame: np.ndarray, reason: str) -> str | None:
+    """Write a JPEG snapshot and return the public URL, or None on failure."""
+    try:
+        fname = (
+            f"{session_id}_{reason}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
+        )
+        if not cv2.imwrite(os.path.join(SNAPSHOT_DIR, fname), frame):
+            return None
+        return f"/snapshots/{fname}"
+    except Exception:
+        return None
 
 
 class SessionSubmit(BaseModel):
@@ -21,6 +56,7 @@ class SessionSubmit(BaseModel):
 class ProctoringEventCreate(BaseModel):
     event_type: str
     confidence: float = 0.0
+    snapshot: str | None = None
 
 
 class ProctoringEventOut(BaseModel):
@@ -29,6 +65,7 @@ class ProctoringEventOut(BaseModel):
     event_type: str
     confidence: float
     timestamp: datetime
+    snapshot_path: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -82,9 +119,12 @@ def submit_session(
         if key in payload.answers and payload.answers[key] == q.get("correct_answer"):
             correct += 1
 
+    session.answers = payload.answers
     session.score = (correct / total * 100) if total > 0 else 0
     session.status = SessionStatus.submitted
     session.submitted_at = datetime.now(timezone.utc)
+    session.result_status = ResultStatus.pending
+    session.final_score = None
     db.commit()
 
     evaluate_and_alert(db, str(session_id))
@@ -125,10 +165,17 @@ def log_proctoring_event(
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid event type: {payload.event_type}")
 
+    snapshot_path = None
+    if payload.snapshot:
+        frame = _decode_frame(payload.snapshot)
+        if frame is not None:
+            snapshot_path = _save_snapshot(session_id, frame, etype.value)
+
     event = ProctoringEvent(
         session_id=session_id,
         event_type=etype,
         confidence=payload.confidence,
+        snapshot_path=snapshot_path,
     )
     db.add(event)
     db.commit()

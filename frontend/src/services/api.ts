@@ -2,6 +2,15 @@ const API_BASE = typeof window !== "undefined"
   ? `${window.location.protocol}//${window.location.hostname}:8000/api`
   : "http://localhost:8000/api";
 
+export function serverUrl(path?: string | null): string {
+  if (!path) return "";
+  if (path.startsWith("http://") || path.startsWith("https://")) return path;
+  const base = typeof window !== "undefined"
+    ? `${window.location.protocol}//${window.location.hostname}:8000`
+    : "http://localhost:8000";
+  return `${base}${path}`;
+}
+
 class ApiClient {
   private token: string | null = null;
 
@@ -89,8 +98,12 @@ class ApiClient {
     return this.request<any>("GET", `/sessions/${sessionId}`);
   }
 
-  logProctoringEvent(sessionId: string, eventType: string, confidence: number = 0) {
-    return this.request<any>("POST", `/sessions/${sessionId}/events`, { event_type: eventType, confidence });
+  logProctoringEvent(sessionId: string, eventType: string, confidence: number = 0, snapshot?: string) {
+    return this.request<any>("POST", `/sessions/${sessionId}/events`, {
+      event_type: eventType,
+      confidence,
+      snapshot: snapshot || null,
+    });
   }
 
   getSessionEvents(sessionId: string) {
@@ -125,6 +138,13 @@ class ApiClient {
 
   getAdminSessionDetail(sessionId: string) {
     return this.request<any>("GET", `/admin/sessions/${sessionId}`);
+  }
+
+  gradeSession(sessionId: string, finalScore: number, notes?: string) {
+    return this.request<any>("POST", `/admin/sessions/${sessionId}/grade`, {
+      final_score: finalScore,
+      notes: notes || null,
+    });
   }
 
   async register(data: { full_name: string; email: string; password: string; student_id?: string; photo?: File }) {

@@ -33,7 +33,9 @@ class ExamSessionOut(BaseModel):
     status: str
     started_at: datetime | None
     submitted_at: datetime | None
-    score: float | None
+    result_status: str
+    final_score: float | None
+    admin_notes: str | None = None
 
     model_config = {"from_attributes": True}
 

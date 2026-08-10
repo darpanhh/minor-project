@@ -1,7 +1,7 @@
 import uuid
 import enum
 from datetime import datetime
-from sqlalchemy import String, Integer, Enum, DateTime, Float, ForeignKey, func
+from sqlalchemy import String, Integer, Enum, DateTime, Float, ForeignKey, Text, func
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
@@ -12,6 +12,11 @@ class SessionStatus(str, enum.Enum):
     in_progress = "in_progress"
     submitted = "submitted"
     flagged = "flagged"
+
+
+class ResultStatus(str, enum.Enum):
+    pending = "pending"
+    reviewed = "reviewed"
 
 
 class Exam(Base):
@@ -50,9 +55,17 @@ class ExamSession(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    answers: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    result_status: Mapped[ResultStatus] = mapped_column(
+        Enum(ResultStatus), default=ResultStatus.pending, nullable=False
+    )
+    final_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    admin_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     exam = relationship("Exam", back_populates="sessions")
     student = relationship("User", back_populates="exam_sessions")
     proctoring_events = relationship("ProctoringEvent", back_populates="session")
     alerts = relationship("Alert", back_populates="session")
     cheating_logs = relationship("CheatingLog", back_populates="session")
+    calibration = relationship("Calibration", back_populates="exam_session", uselist=False)

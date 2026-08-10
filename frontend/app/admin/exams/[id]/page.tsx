@@ -133,7 +133,7 @@ export default function AdminExamDetailPage() {
                   <tr className="border-b border-slate-100">
                     <th className="text-left py-3 pr-4 text-xs font-medium text-slate-500 uppercase tracking-wide">Student</th>
                     <th className="text-left py-3 pr-4 text-xs font-medium text-slate-500 uppercase tracking-wide">Status</th>
-                    <th className="text-left py-3 pr-4 text-xs font-medium text-slate-500 uppercase tracking-wide">Score</th>
+                    <th className="text-left py-3 pr-4 text-xs font-medium text-slate-500 uppercase tracking-wide">Result</th>
                     <th className="py-3" />
                   </tr>
                 </thead>
@@ -155,13 +155,16 @@ export default function AdminExamDetailPage() {
                         }`}>{s.status}</span>
                       </td>
                       <td className="py-3 pr-4">
-                        <span className={`text-sm font-semibold ${
-                          s.score != null && s.score >= 60 ? "text-emerald-600" :
-                          s.score != null && s.score >= 40 ? "text-amber-600" :
-                          s.score != null ? "text-red-600" : "text-slate-400"
-                        }`}>
-                          {s.score != null ? `${Math.round(s.score)}%` : "\u2014"}
-                        </span>
+                        {s.result_status === "reviewed" && s.final_score != null ? (
+                          <span className={`text-sm font-semibold ${
+                            s.final_score >= 60 ? "text-emerald-600" :
+                            s.final_score >= 40 ? "text-amber-600" : "text-red-600"
+                          }`}>
+                            {Math.round(s.final_score)}%
+                          </span>
+                        ) : (
+                          <span className="text-xs font-medium text-amber-600">Pending review</span>
+                        )}
                       </td>
                       <td className="py-3 text-right">
                         <Link

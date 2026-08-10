@@ -28,74 +28,111 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="flex-1 flex items-center justify-center p-6">
-      <div className="w-full max-w-sm animate-fade-in">
-        <div className="text-center mb-8">
-          <div className="w-12 h-12 rounded-xl bg-indigo-600 flex items-center justify-center text-white text-lg font-bold mx-auto mb-4">
-            V
+    <div className="min-h-[85vh] flex items-center justify-center p-4 sm:p-6">
+      <div className="w-full max-w-md">
+        {/* Logo & Welcome Header */}
+        <div className="text-center mb-6">
+          <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-primary to-blue-500 flex items-center justify-center text-white text-2xl font-bold mx-auto mb-3 shadow-xl shadow-primary/25 border border-white/20">
+            <span className="material-symbols-outlined text-2xl">visibility</span>
           </div>
-          <h1 className="text-2xl font-bold text-slate-900">Welcome back</h1>
-          <p className="text-sm text-slate-500 mt-1">Sign in to your account</p>
+          <h1 className="text-2xl sm:text-3xl font-extrabold text-foreground tracking-tight">
+            Vision<span className="text-primary font-black">Proctor</span>
+          </h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            Sign in to access your secure examination portal
+          </p>
         </div>
 
-        <form onSubmit={handleSubmit} className="content-card space-y-5">
-          {error && (
-            <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-sm text-red-700">
-              {error}
-            </div>
-          )}
-
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1.5">Email</label>
-            <input
-              type="email"
-              placeholder="you@example.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-              className="input-focus w-full border border-slate-300 rounded-lg px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1.5">Password</label>
-            <input
-              type="password"
-              placeholder="Enter your password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-              className="input-focus w-full border border-slate-300 rounded-lg px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400"
-            />
-          </div>
-
-          <button
-            type="submit"
-            disabled={loading}
-            className="btn-primary w-full flex items-center justify-center gap-2"
-          >
-            {loading && (
-              <div className="w-4 h-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />
+        {/* Card Form */}
+        <div className="bg-card border border-border/80 rounded-2xl p-6 sm:p-8 shadow-2xl shadow-primary/5 backdrop-blur-xl">
+          <form onSubmit={handleSubmit} className="space-y-4">
+            {error && (
+              <div className="bg-destructive/10 border border-destructive/20 rounded-xl px-4 py-3 text-sm text-destructive flex items-center gap-2">
+                <span className="material-symbols-outlined text-lg shrink-0">error</span>
+                <span>{error}</span>
+              </div>
             )}
-            {loading ? "Signing in..." : "Sign in"}
-          </button>
 
-          <div className="relative">
+            <div>
+              <label className="block text-xs font-semibold text-foreground uppercase tracking-wider mb-1.5">
+                Email Address
+              </label>
+              <div className="relative">
+                <span className="material-symbols-outlined absolute left-3.5 top-1/2 -translate-y-1/2 text-muted-foreground text-lg">
+                  mail
+                </span>
+                <input
+                  type="email"
+                  placeholder="name@university.edu"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  required
+                  className="w-full bg-background border border-input rounded-xl pl-10 pr-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-foreground uppercase tracking-wider mb-1.5">
+                Password
+              </label>
+              <div className="relative">
+                <span className="material-symbols-outlined absolute left-3.5 top-1/2 -translate-y-1/2 text-muted-foreground text-lg">
+                  lock
+                </span>
+                <input
+                  type="password"
+                  placeholder="••••••••••••"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                  className="w-full bg-background border border-input rounded-xl pl-10 pr-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all"
+                />
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full mt-2 py-3 bg-gradient-to-r from-primary to-blue-600 hover:from-primary/90 hover:to-blue-500 text-white font-semibold rounded-xl text-sm transition-all shadow-lg shadow-primary/25 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-70"
+            >
+              {loading ? (
+                <>
+                  <div className="w-4 h-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />
+                  <span>Signing in...</span>
+                </>
+              ) : (
+                <>
+                  <span>Sign In to Portal</span>
+                  <span className="material-symbols-outlined text-lg">login</span>
+                </>
+              )}
+            </button>
+          </form>
+
+          <div className="relative my-6">
             <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-slate-200" />
+              <div className="w-full border-t border-border" />
             </div>
             <div className="relative flex justify-center text-xs">
-              <span className="bg-white px-2 text-slate-400">or</span>
+              <span className="bg-card px-3 text-muted-foreground font-medium">New student?</span>
             </div>
           </div>
 
           <Link
             href="/register"
-            className="btn-secondary w-full flex items-center justify-center gap-2"
+            className="w-full py-2.5 bg-muted/60 hover:bg-muted border border-border text-foreground font-medium rounded-xl text-sm transition-all flex items-center justify-center gap-2"
           >
-            Create an account
+            <span className="material-symbols-outlined text-lg text-primary">person_add</span>
+            <span>Create Student Account</span>
           </Link>
-        </form>
+        </div>
+
+        {/* Footer info */}
+        <p className="text-xs text-center text-muted-foreground mt-6 flex items-center justify-center gap-1">
+          <span className="material-symbols-outlined text-sm text-emerald-500">verified_user</span>
+          <span>End-to-End AI Proctoring & Biometric Integrity</span>
+        </p>
       </div>
     </div>
   );
