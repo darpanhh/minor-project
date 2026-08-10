@@ -1,18 +1,16 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { api } from "@/src/services/api";
 // Local fallback Button to avoid missing import during verification
 function Button({
   children,
   className = "",
-  size,
   disabled,
   onClick,
 }: React.PropsWithChildren<{
   className?: string;
-  size?: string;
   disabled?: boolean;
   onClick?: () => void;
 }>) {
@@ -36,15 +34,15 @@ interface CheckItem {
 }
 
 const CALIBRATION_POINTS = [
-  { id: "top_left", label: "Top Left", x: 25, y: 25 },
-  { id: "top_center", label: "Top Center", x: 50, y: 25 },
-  { id: "top_right", label: "Top Right", x: 75, y: 25 },
-  { id: "middle_left", label: "Middle Left", x: 25, y: 50 },
+  { id: "top_left", label: "Top Left", x: 5, y: 6 },
+  { id: "top_center", label: "Top Center", x: 50, y: 6 },
+  { id: "top_right", label: "Top Right", x: 95, y: 6 },
+  { id: "middle_left", label: "Middle Left", x: 5, y: 50 },
   { id: "center", label: "Center", x: 50, y: 50 },
-  { id: "middle_right", label: "Middle Right", x: 75, y: 50 },
-  { id: "bottom_left", label: "Bottom Left", x: 25, y: 75 },
-  { id: "bottom_center", label: "Bottom Center", x: 50, y: 75 },
-  { id: "bottom_right", label: "Bottom Right", x: 75, y: 75 },
+  { id: "middle_right", label: "Middle Right", x: 95, y: 50 },
+  { id: "bottom_left", label: "Bottom Left", x: 5, y: 94 },
+  { id: "bottom_center", label: "Bottom Center", x: 50, y: 94 },
+  { id: "bottom_right", label: "Bottom Right", x: 95, y: 94 },
 ];
 
 const WS_BASE =
@@ -96,7 +94,7 @@ export default function VerifyPage() {
       setPhase("calibration");
     };
     runChecksAndFetchSession();
-  }, []);
+  }, [checks.length, params.id]);
 
   // ── Start camera for calibration ───────────────────────────────
   useEffect(() => {
@@ -133,7 +131,7 @@ export default function VerifyPage() {
   }, [phase]);
 
   // ── Build calibration WebSocket URL ────────────────────────────
-  function buildCalibrationUrl(): string {
+  const buildCalibrationUrl = useCallback((): string => {
     let wsUrl = WS_BASE;
     if (typeof window !== "undefined") {
       try {
@@ -156,7 +154,7 @@ export default function VerifyPage() {
       }
     }
     return `${wsUrl}/calibration/${session?.id || params.id}`;
-  }
+  }, [session?.id, params.id]);
 
   const [capturing, setCapturing] = useState(false);
 
@@ -176,7 +174,7 @@ export default function VerifyPage() {
       wsRef.current = null;
       ws.close();
     };
-  }, [phase]);
+  }, [phase, buildCalibrationUrl]);
 
   // ── Capture frames for the current point ───────────────────────
   async function captureCurrentPoint() {
@@ -330,93 +328,88 @@ export default function VerifyPage() {
 
       {/* ── Phase: calibration ───────────────────────────────────── */}
       {phase === "calibration" && (
-        <div className="fixed inset-0 z-50 bg-black flex flex-col items-center justify-center overflow-hidden">
+        <div className="fixed inset-0 z-[100] bg-slate-950/95 backdrop-blur-md flex flex-col items-center justify-between overflow-hidden p-6">
           <video
             ref={videoRef}
             autoPlay
             playsInline
             muted
-            className="absolute inset-0 w-full h-full object-cover opacity-70"
+            className="absolute inset-0 w-full h-full object-cover opacity-20 pointer-events-none"
           />
-          <div className="absolute inset-0 bg-black/40" />
+          <div className="absolute inset-0 bg-gradient-to-b from-slate-950/80 via-transparent to-slate-950/90 pointer-events-none" />
 
+          {/* Floating Top Banner */}
+          <div className="relative z-20 bg-slate-900/90 backdrop-blur-xl border border-slate-800 rounded-full px-6 py-2.5 shadow-2xl flex items-center gap-3 text-white text-sm font-medium">
+            <span className="w-2.5 h-2.5 rounded-full bg-blue-500 animate-ping" />
+            <span>Look directly at the <strong className="text-blue-400 font-bold capitalize">{currentPoint?.label || ""}</strong> point dot</span>
+          </div>
+
+          {/* Calibration Target Dot */}
           {currentPoint && (
             <div
-              className="absolute z-10"
+              className="absolute z-30 transition-all duration-300 ease-out"
               style={{
                 left: `${currentPoint.x}%`,
                 top: `${currentPoint.y}%`,
                 transform: "translate(-50%, -50%)",
               }}
             >
-              <div className="w-6 h-6 bg-primary/80 rounded-full animate-pulse" />
-              <div className="absolute -inset-3 border-2 border-primary/60 rounded-full" />
+              <div className="relative flex items-center justify-center">
+                {/* Outer glowing pulsing ring */}
+                <div className="absolute -inset-4 rounded-full bg-blue-500/20 border-2 border-blue-500/80 animate-ping" />
+                <div className="absolute -inset-2 rounded-full border border-cyan-400/60 animate-pulse" />
+                {/* Center dot */}
+                <div className="w-7 h-7 bg-gradient-to-tr from-blue-600 to-cyan-400 rounded-full shadow-[0_0_20px_rgba(56,189,248,0.8)] border-2 border-white flex items-center justify-center text-[10px] font-bold text-slate-950">
+                  {calibrationPointIndex + 1}
+                </div>
+              </div>
             </div>
           )}
 
-          <div className="relative z-10 text-center mb-8">
-            <p className="text-white text-lg font-medium">
-              Look at the{" "}
-              <span className="text-primary font-bold">
-                {currentPoint?.label.toLowerCase() || ""}
-              </span>{" "}
-              point
-            </p>
-          </div>
-
-          <div className="relative z-10 flex flex-col items-center gap-4">
-            {capturedFrames > 0 && !capturing && (
-              <p className="text-white/70 text-sm">
-                Captured {capturedFrames} frames
-              </p>
-            )}
-            {capturing && (
-              <div className="flex items-center gap-2">
-                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                <p className="text-white text-sm">
-                  Capturing {capturedFrames} / {FRAMES_PER_POINT}
-                </p>
-              </div>
-            )}
-            {!capturing && capturedFrames === 0 && (
-              <button
-                onClick={captureCurrentPoint}
-                className="px-6 py-2 bg-primary text-white rounded-lg font-medium hover:bg-primary/90 transition"
-              >
-                Start Capture
-              </button>
-            )}
-            {!capturing && capturedFrames > 0 && (
-              <button
-                onClick={nextPoint}
-                className="px-6 py-2 bg-primary text-white rounded-lg font-medium hover:bg-primary/90 transition"
-              >
-                {calibrationPointIndex >= CALIBRATION_POINTS.length - 1
-                  ? "Finish"
-                  : "Next"}
-              </button>
-            )}
-          </div>
-
-          <div className="absolute bottom-8 left-1/2 -translate-x-1/2 w-64 z-10">
-            <div className="flex gap-1">
-              {CALIBRATION_POINTS.map((_, i) => (
-                <div
-                  key={i}
-                  className={`h-1 flex-1 rounded-full transition-colors ${
-                    i < calibrationPointIndex
-                      ? "bg-primary"
-                      : i === calibrationPointIndex
-                        ? "bg-primary/60"
-                        : "bg-white/20"
-                  }`}
-                />
-              ))}
+          {/* Floating Bottom Control Toolbar */}
+          <div className="relative z-20 bg-slate-900/90 backdrop-blur-xl border border-slate-800 rounded-2xl p-4 shadow-2xl flex flex-col items-center gap-3 max-w-md w-full mb-2">
+            <div className="flex items-center justify-between w-full text-xs text-slate-400 px-1">
+              <span>Point {calibrationPointIndex + 1} of {CALIBRATION_POINTS.length} ({currentPoint?.label})</span>
+              <span>{capturedFrames}/{FRAMES_PER_POINT} frames</span>
             </div>
-            <p className="text-white/50 text-xs text-center mt-1">
-              Point {calibrationPointIndex + 1} of{" "}
-              {CALIBRATION_POINTS.length}
-            </p>
+
+            <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+              <div
+                className="bg-gradient-to-r from-blue-500 to-cyan-400 h-full transition-all duration-200"
+                style={{
+                  width: `${((calibrationPointIndex + (capturedFrames / FRAMES_PER_POINT)) / CALIBRATION_POINTS.length) * 100}%`,
+                }}
+              />
+            </div>
+
+            <div className="flex items-center gap-3 w-full pt-1">
+              {!capturing && capturedFrames === 0 && (
+                <button
+                  onClick={captureCurrentPoint}
+                  className="w-full py-2.5 bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white font-semibold rounded-xl text-sm transition shadow-lg shadow-blue-500/25 flex items-center justify-center gap-2"
+                >
+                  <span className="material-symbols-outlined text-base">center_focus_strong</span>
+                  Start Capture Point
+                </button>
+              )}
+
+              {capturing && (
+                <div className="w-full py-2.5 bg-slate-800/80 border border-slate-700 text-white rounded-xl text-sm flex items-center justify-center gap-2">
+                  <div className="w-4 h-4 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin" />
+                  <span>Recording gaze data ({capturedFrames}/{FRAMES_PER_POINT})...</span>
+                </div>
+              )}
+
+              {!capturing && capturedFrames > 0 && (
+                <button
+                  onClick={nextPoint}
+                  className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl text-sm transition shadow-lg shadow-emerald-600/25 flex items-center justify-center gap-2"
+                >
+                  <span>{calibrationPointIndex >= CALIBRATION_POINTS.length - 1 ? "Complete Calibration" : "Next Point"}</span>
+                  <span className="material-symbols-outlined text-base">arrow_forward</span>
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -450,7 +443,6 @@ export default function VerifyPage() {
 
             <Button
               className="w-full"
-              size="lg"
               disabled={starting}
               onClick={async () => {
                 if (!session || starting) return;

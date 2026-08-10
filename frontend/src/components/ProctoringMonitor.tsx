@@ -69,7 +69,7 @@ export default function ProctoringMonitor({
 
   const [connected, setConnected] = useState(false);
   const [alerts, setAlerts] = useState<Alert[]>([]);
-  const [gazeStatus, setGazeStatus] = useState<string | null>(null);
+  const [gazeStatus, setGazeStatus] = useState<string | null>("normal");
   const [gazeAngles, setGazeAngles] = useState<string>("");
   const [wsError, setWsError] = useState(false);
   const [fatalError, setFatalError] = useState<string | null>(null);
@@ -120,7 +120,7 @@ export default function ProctoringMonitor({
         return;
       }
 
-      const violation = gaze.violation_active;
+      const violation = gaze.violation_active && gaze.status !== "normal";
       const baseColor = violation ? "#ef4444" : "#22c55e";
 
       // ── Status badge (top-right) ─────────────────────────────
@@ -146,8 +146,6 @@ export default function ProctoringMonitor({
 
       // ── Gaze direction arrow + dot ───────────────────────────
       if (gaze.yaw !== null && gaze.pitch !== null) {
-        // Camera feed is not mirrored (raw), so negate yaw/pitch
-        // so the arrow follows the visual nose/chin movement.
         const displayYaw = -gaze.yaw;
         const displayPitch = -gaze.pitch;
         const scale = Math.max(cw, ch) / 100;
@@ -166,7 +164,7 @@ export default function ProctoringMonitor({
         ctx.stroke();
         ctx.setLineDash([]);
 
-        // Arrow shaft (solid line, thicker)
+        // Arrow shaft
         ctx.strokeStyle = baseColor;
         ctx.globalAlpha = 0.7;
         ctx.lineWidth = 3;
@@ -205,24 +203,11 @@ export default function ProctoringMonitor({
 
       // ── Looking-at label (top-left, large) ───────────────────
       {
-        const yaw = gaze.yaw ?? 0;
-        const pitch = gaze.pitch ?? 0;
-        const h =
-          yaw > 8 ? "right" :
-          yaw < -8 ? "left" :
-          "center";
-        const v =
-          pitch > 8 ? "down" :
-          pitch < -8 ? "up" :
-          "center";
-        const zone = h === "center" && v === "center" ? "center" :
-                     v === "center" ? h :
-                     h === "center" ? v :
-                     `${v}_${h}`;
-        const isCenter = zone === "center";
-        ctx.fillStyle = isCenter ? "rgba(34,197,94,0.90)" : "rgba(239,68,68,0.90)";
+        const zone = gaze.predicted_point || "center";
+        const isNormal = gaze.status === "normal" && !violation;
+        ctx.fillStyle = isNormal ? "rgba(34,197,94,0.90)" : "rgba(239,68,68,0.90)";
         ctx.font = "bold 15px sans-serif";
-        const label = `Looking: ${zone.replace(/_/g, " ")} ${isCenter ? "✓" : "⚠"}`;
+        const label = `Looking: ${zone.replace(/_/g, " ")} ${isNormal ? "✓" : "⚠"}`;
         ctx.fillText(label, 10, 30);
 
         // Confidence bar
@@ -232,7 +217,7 @@ export default function ProctoringMonitor({
         const barH = 6;
         ctx.fillStyle = "rgba(255,255,255,0.20)";
         ctx.fillRect(barX, barY, barW, barH);
-        ctx.fillStyle = isCenter ? "#22c55e" : "#f59e0b";
+        ctx.fillStyle = isNormal ? "#22c55e" : "#f59e0b";
         ctx.fillRect(barX, barY, barW * gaze.confidence, barH);
         ctx.fillStyle = "rgba(255,255,255,0.60)";
         ctx.font = "10px sans-serif";
@@ -242,12 +227,10 @@ export default function ProctoringMonitor({
       // ── Angle readout (bottom-left corner) ───────────────────
       if (gaze.yaw !== null && gaze.pitch !== null) {
         ctx.fillStyle = "rgba(255,255,255,0.70)";
-        ctx.font = "12px monospace";
         const yOff = ch - 60;
 
-        // Direction labels
-        const hDir = gaze.yaw > 5 ? "← LEFT" : gaze.yaw < -5 ? "RIGHT →" : "CENTER";
-        const vDir = gaze.pitch > 5 ? "↑ UP" : gaze.pitch < -5 ? "↓ DOWN" : "—";
+        const hDir = gaze.yaw > 12 ? "← LEFT" : gaze.yaw < -12 ? "RIGHT →" : "CENTER";
+        const vDir = gaze.pitch > 12 ? "↑ UP" : gaze.pitch < -12 ? "↓ DOWN" : "—";
         ctx.font = "bold 13px sans-serif";
         ctx.fillText(`${hDir}  ${vDir}`, 10, yOff);
 

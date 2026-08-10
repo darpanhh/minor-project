@@ -11,6 +11,11 @@ logger = logging.getLogger(__name__)
 
 _SMOOTHING_BUFFER_SIZE = 3
 
+# Startup grace: ignore all gaze/head violations for the first N seconds of a
+# session so students settling in (adjusting posture, camera warmup, etc.)
+# are not flagged immediately.
+_STARTUP_GRACE_SEC = 8.0
+
 _AWAY_ZONES = {
     "top_left", "top_center", "top_right",
     "middle_left", "middle_right",
@@ -23,8 +28,8 @@ _GAZE_EVENT_THRESHOLDS_SEC = {
     "high": 5.0,
 }
 
-_HEAD_TURN_YAW_THRESHOLD = 30.0
-_LOOKING_DOWN_PITCH_THRESHOLD = -20.0
+_HEAD_TURN_YAW_THRESHOLD = 38.0
+_LOOKING_DOWN_PITCH_THRESHOLD = -35.0
 _LOOKING_OFF_SCREEN_TIMEOUT = 3.0
 
 _EVENT_COOLDOWN_SEC = 10.0
@@ -65,6 +70,8 @@ class GazeService:
         self._face_detected: bool = False
         self._frame_timestamp: float = 0.0
 
+        self._frame_count: int = 0
+        self._started_at: float | None = None
         self._violations: dict[str, dict] = {
             "GAZE_AWAY": {"active": False, "start": None, "events": []},
             "HEAD_TURN": {"active": False, "start": None, "events": []},
@@ -84,7 +91,10 @@ class GazeService:
 
     def process_frame(self, frame) -> dict:
         now = time.time()
+        if self._started_at is None:
+            self._started_at = now
         self._frame_timestamp = now
+        self._frame_count += 1
 
         face = self._detect_face(frame)
         if not face:
@@ -176,18 +186,28 @@ class GazeService:
             return None
         return results.multi_face_landmarks[0]
 
+    def _in_startup_grace(self, now: float) -> bool:
+        return self._started_at is not None and now - self._started_at < _STARTUP_GRACE_SEC
+
     def _handle_no_face(self, now: float) -> None:
         if self._no_face_since is None:
             self._no_face_since = now
 
-        vs = self._violations["LOOKING_OFF_SCREEN"]
-        if not vs["active"]:
-            vs["active"] = True
-            vs["start"] = self._no_face_since
-            vs["events"] = []
-            logger.info("Gaze: no face detected, starting LOOKING_OFF_SCREEN timer")
+        # Startup grace: never flag a missing face while the student settles in
+        if self._in_startup_grace(now):
+            self._clear_non_matching_violations(set())
+        # Only activate LOOKING_OFF_SCREEN after a 1.5s grace period
+        elif now - self._no_face_since >= 1.5:
+            vs = self._violations["LOOKING_OFF_SCREEN"]
+            if not vs["active"]:
+                vs["active"] = True
+                vs["start"] = self._no_face_since
+                vs["events"] = []
+                logger.info("Gaze: no face detected, starting LOOKING_OFF_SCREEN timer")
+            self._clear_non_matching_violations({"LOOKING_OFF_SCREEN"})
+        else:
+            self._clear_non_matching_violations(set())
 
-        self._clear_non_matching_violations({"LOOKING_OFF_SCREEN"})
         self._buffer.clear()
         self._smoothed_point = None
         self._smoothed_confidence = 0.0
@@ -241,25 +261,25 @@ class GazeService:
         if not self._face_detected:
             return
 
+        # Startup grace period: do not flag any gaze/head violations during the
+        # first few seconds of the session
+        if self._in_startup_grace(now):
+            self._clear_non_matching_violations(set())
+            return
+
         active_violations: set[str] = set()
         yaw = self._current_features.get("yaw")
         pitch = self._current_features.get("pitch")
 
         # ── GAZE_AWAY ──────────────────────────────────────────────
-        # Use raw per-frame prediction for instant responsiveness.
-        # The smoothed point lags behind; using it for violation
-        # detection causes the "stuck" behaviour users reported.
-        if self._last_raw_point is not None and self._last_raw_point != "unknown":
-            is_away = self._last_raw_point in _AWAY_ZONES
-            low_conf = self._last_raw_confidence < 0.4
-            if is_away or low_conf:
+        # Require buffer consensus (at least 2 away-zone votes out of 3 frames)
+        if len(self._buffer) >= _SMOOTHING_BUFFER_SIZE:
+            away_votes = sum(1 for item in self._buffer if item.get("point") in _AWAY_ZONES)
+            if away_votes >= 2:
                 active_violations.add("GAZE_AWAY")
 
-        # Forced clear: if the raw prediction is clearly "center"
-        # and confidence is decent, never flag GAZE_AWAY this frame.
-        if (self._last_raw_point == "center"
-                and self._last_raw_confidence >= 0.3
-                and yaw is not None and abs(yaw) < 20):
+        # Forced clear: if smoothed prediction or current raw prediction is "center"
+        if (self._smoothed_point == "center" or self._last_raw_point == "center") and yaw is not None and abs(yaw) < 22:
             active_violations.discard("GAZE_AWAY")
 
         # ── HEAD_TURN ──────────────────────────────────────────────

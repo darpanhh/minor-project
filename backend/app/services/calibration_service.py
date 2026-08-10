@@ -13,6 +13,47 @@ CALIBRATION_POINTS = [
     "bottom_left", "bottom_center", "bottom_right",
 ]
 
+# How strongly each calibration point is nudged away from the exact value the
+# student produced while looking at the dot. The stored reference for every zone
+# is set *slightly different* from what was actually measured so the proctor has
+# a small buffer: e.g. the "top_left" reference gets a bit more "top" and a bit
+# more "left". Increase this value to make the offset more pronounced.
+CALIBRATION_OFFSET_DEG = 3.0
+
+# Per-zone offset multipliers applied to the head-pose features before the
+# calibration profile is persisted. Feature sign conventions (see gaze_service /
+# head_pose):
+#   yaw   + = toward the student's LEFT,  - = toward the student's RIGHT
+#   pitch + = UP (top),                   - = DOWN (bottom)
+CALIBRATION_OFFSETS = {
+    "top_left":      {"yaw": 1.0, "pitch": 1.0},
+    "top_center":    {"yaw": 0.0, "pitch": 1.0},
+    "top_right":     {"yaw": -1.0, "pitch": 1.0},
+    "middle_left":   {"yaw": 1.0, "pitch": 0.0},
+    "center":        {"yaw": 0.0, "pitch": 0.0},
+    "middle_right":  {"yaw": -1.0, "pitch": 0.0},
+    "bottom_left":   {"yaw": 1.0, "pitch": -1.0},
+    "bottom_center": {"yaw": 0.0, "pitch": -1.0},
+    "bottom_right":  {"yaw": -1.0, "pitch": -1.0},
+}
+
+
+def apply_point_offset(point_name: str, averaged_features: dict) -> dict:
+    """Return a copy of *averaged_features* nudged slightly toward its zone.
+
+    Keeps the raw measured values untouched — the offset is only applied to the
+    stored calibration profile so it differs slightly from what was taken.
+    """
+    adjusted = dict(averaged_features)
+    offsets = CALIBRATION_OFFSETS.get(point_name, {})
+    yaw = adjusted.get("yaw")
+    pitch = adjusted.get("pitch")
+    if yaw is not None:
+        adjusted["yaw"] = yaw + offsets.get("yaw", 0.0) * CALIBRATION_OFFSET_DEG
+    if pitch is not None:
+        adjusted["pitch"] = pitch + offsets.get("pitch", 0.0) * CALIBRATION_OFFSET_DEG
+    return adjusted
+
 
 class CalibrationService:
 
@@ -65,7 +106,7 @@ class CalibrationService:
                 db.add(cal)
 
             profile = dict(cal.profile) if cal.profile else {}
-            profile[point_name] = dict(averaged_features)
+            profile[point_name] = apply_point_offset(point_name, averaged_features)
             cal.profile = profile
 
             print(f"[CalibrationService] Saved {point_name} to database")

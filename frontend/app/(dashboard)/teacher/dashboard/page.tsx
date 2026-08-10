@@ -1,9 +1,5 @@
 "use client";
 
-import { Card, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import Link from "next/link";
-
 const students = [
   { name: "Julianne Smith", id: "44920", score: 94.5, status: "passed", integrity: 99 },
   { name: "Marcus Porter", id: "44811", score: 82.0, status: "passed", integrity: 96 },

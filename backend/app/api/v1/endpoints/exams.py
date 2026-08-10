@@ -28,7 +28,7 @@ class ExamCreateMCQ(BaseModel):
 
 
 class ExamOutWithSessions(ExamOut):
-    sessions: list[ExamSessionOut] = []
+    sessions: list[ExamSessionDetailOut] = []
 
 
 class SessionSubmit(BaseModel):

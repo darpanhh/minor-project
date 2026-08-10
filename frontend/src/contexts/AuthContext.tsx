@@ -24,19 +24,16 @@ const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => typeof window === "undefined" || !localStorage.getItem("access_token"));
 
   useEffect(() => {
     const token = localStorage.getItem("access_token");
-    if (token) {
-      api.setToken(token);
-      api.me()
-        .then((u) => setUser({ id: u.id, full_name: u.full_name, email: u.email, role: u.role, student_id: u.student_id, registered_photo: u.registered_photo }))
-        .catch(() => { api.setToken(null); })
-        .finally(() => setLoading(false));
-    } else {
-      setLoading(false);
-    }
+    if (!token) return;
+    api.setToken(token);
+    api.me()
+      .then((u) => setUser({ id: u.id, full_name: u.full_name, email: u.email, role: u.role, student_id: u.student_id, registered_photo: u.registered_photo }))
+      .catch(() => { api.setToken(null); })
+      .finally(() => setLoading(false));
   }, []);
 
   async function login(email: string, password: string) {

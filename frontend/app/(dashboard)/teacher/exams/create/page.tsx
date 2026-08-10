@@ -1,16 +1,6 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
-
 export default function CreateExamPage() {
-  const router = useRouter();
-  const [questions, setQuestions] = useState<{ text: string; options: string[]; correct: number; marks: number }[]>([]);
-
   return (
     <div className="max-w-4xl mx-auto space-y-6">
       <div>

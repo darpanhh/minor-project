@@ -29,6 +29,22 @@ _DEFAULT_WEIGHTS = {
     "roll": 0.04,
 }
 
+# Tolerance margin applied around the centre calibration point.
+#
+# The estimator first finds the closest calibration point (best point). If the
+# best point is an "away" zone but the current features are also close to the
+# centre point (i.e. distance_to_centre <= MARGIN_FACTOR * distance_to_best),
+# the point is treated as "centre" instead.
+#
+# This gives a comfortable buffer so that slightly looking up, down, left or
+# right of centre does NOT immediately get flagged as a gaze-away violation.
+# Only when the student clearly commits to an edge/away zone (a much larger
+# distance to centre than to the away point) does the violation trigger.
+#
+# The geometric interpretation: with the 3x3 calibration grid, the centre zone
+# expands to ~60% of the way toward any adjacent zone before a violation fires.
+MARGIN_FACTOR = 1.85
+
 
 class GazeEstimator:
     """
@@ -43,8 +59,9 @@ class GazeEstimator:
     handled by the caller (GazeService).
     """
 
-    def __init__(self, weights: dict[str, float] | None = None):
+    def __init__(self, weights: dict[str, float] | None = None, margin_factor: float = MARGIN_FACTOR):
         self.weights = weights or dict(_DEFAULT_WEIGHTS)
+        self.margin_factor = margin_factor
 
     def compare(self, calibration_profile: dict, current_features: dict) -> dict:
         """
@@ -100,12 +117,35 @@ class GazeEstimator:
         best_point = min(distances, key=distances.get)
         best_dist = distances[best_point]
 
+        # ── Apply centre tolerance margin ──────────────────────────
+        # If the closest point is an "away" zone but the current features are
+        # still reasonably close to the calibrated centre point, classify the
+        # gaze as "centre" so that slight deviations are not flagged.
+        margin_override = False
+        if best_point != "center":
+            d_center = distances.get("center")
+            if d_center is not None and best_dist > 0 and d_center <= best_dist * self.margin_factor:
+                best_point = "center"
+                margin_override = True
+                best_dist = d_center
+
         all_scores = []
         for pn, d in sorted(distances.items(), key=lambda x: x[1]):
             c = self._distance_to_confidence(d)
             all_scores.append({"point": pn, "distance": d, "confidence": c})
 
-        confidence = self._distance_to_confidence(best_dist)
+        if margin_override:
+            # Borderline classification: express confidence as how much closer
+            # the current features are to centre than to the nearest away zone.
+            # Equidistant -> ~0.5, increasingly off-centre -> lower.
+            d_center = best_dist
+            nearest_away = min(
+                (d for pn, d in distances.items() if pn != "center"),
+                default=0.0,
+            )
+            confidence = max(0.0, min(1.0, 1.0 - d_center / (d_center + nearest_away)))
+        else:
+            confidence = self._distance_to_confidence(best_dist)
 
         logger.debug(
             "GazeEstimator: point=%s dist=%.4f conf=%.3f",
@@ -133,19 +173,19 @@ class GazeEstimator:
 
         zone = "center"
 
-        if yaw > 20:
+        if yaw > 28:
             zone = "middle_left"
-        elif yaw < -20:
+        elif yaw < -28:
             zone = "middle_right"
 
-        if pitch > 15:
+        if pitch > 25:
             if zone == "center":
                 zone = "top_center"
             elif zone == "middle_left":
                 zone = "top_left"
             elif zone == "middle_right":
                 zone = "top_right"
-        elif pitch < -15:
+        elif pitch < -32:
             if zone == "center":
                 zone = "bottom_center"
             elif zone == "middle_left":
@@ -164,5 +204,9 @@ class GazeEstimator:
     def _distance_to_confidence(distance: float) -> float:
         if distance == float("inf"):
             return 0.0
-        c = math.exp(-distance * 2.5)
+        # Calibrated to the typical feature-space spacing between calibration
+        # points (~5 units): a perfect match scores 1.0, a half-way-toward-the
+        # next-point gaze scores ~0.5, and being clearly on the adjacent point
+        # scores ~0.25.
+        c = math.exp(-distance / 5.0)
         return max(0.0, min(1.0, c))

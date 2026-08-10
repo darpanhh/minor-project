@@ -82,8 +82,6 @@ def _decode_frame(data_url_or_b64: str) -> np.ndarray | None:
 
 def _save_snapshot(session_id: str, frame: np.ndarray, reason: str) -> str:
     """Write a JPEG snapshot and return the filename."""
-    ts = datetime.now().strftime("%Y%2md_%H%M%S_%f")
-    # Clean up formatting representation safely
     fname = f"{session_id}_{reason}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
     cv2.imwrite(os.path.join(SNAPSHOT_DIR, fname), frame)
     return fname
@@ -355,11 +353,26 @@ async def proctor_ws(
             if gaze_events:
                 db_gaze = SessionLocal()
                 try:
+                    # If a primary object violation like phone_detected or multiple_persons
+                    # is active in the CURRENT frame, do not record redundant gaze_away
+                    # events (which would produce snapshots mislabeled "gaze away" for
+                    # what is actually a phone violation). Uses the frame-accurate
+                    # per-frame flags, not the throttled snapshot_reasons list.
+                    object_violation_active = (
+                        bool(result.get("phone_detected"))
+                        or (result.get("person_count") or 0) > 1
+                    )
                     for ev in gaze_events:
-                        _persist_event(db_gaze, session_uuid, ev["event_type"], ev["confidence"], None)
+                        if object_violation_active and ev["violation_type"] in ("GAZE_AWAY", "LOOKING_DOWN"):
+                            logger.info("Suppressing gaze event %s due to active object detection", ev["violation_type"])
+                            continue
+
+                        fname = _save_snapshot(str(session_uuid), frame, ev["violation_type"])
+                        snapshot_url = f"/snapshots/{fname}"
+                        _persist_event(db_gaze, session_uuid, ev["event_type"], ev["confidence"], snapshot_url)
                         logger.info(
-                            "Gaze event: %s (conf=%.2f dur=%.1fs)",
-                            ev["violation_type"], ev["confidence"], ev["duration"],
+                            "Gaze event: %s (conf=%.2f dur=%.1fs snapshot=%s)",
+                            ev["violation_type"], ev["confidence"], ev["duration"], fname,
                         )
                         result.setdefault("alerts", []).append({
                             "type": ev["violation_type"],
