@@ -81,7 +81,7 @@ export default function CreateExamPage() {
 
   return (
     <ProtectedRoute role="admin">
-      <div className="p-6 max-w-3xl mx-auto animate-fade-in">
+      <div className="max-w-3xl mx-auto animate-fade-in">
         <div className="mb-8">
           <h1 className="text-2xl font-bold text-slate-900">Create MCQ Exam</h1>
           <p className="text-sm text-slate-500 mt-1">Set up a new exam with questions and answers</p>

@@ -24,11 +24,15 @@ const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(() => typeof window === "undefined" || !!localStorage.getItem("access_token"));
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const token = localStorage.getItem("access_token");
-    if (!token) return;
+    if (!token) {
+      api.setToken(null);
+      Promise.resolve().then(() => setLoading(false));
+      return;
+    }
     api.setToken(token);
     api.me()
       .then((u) => setUser({ id: u.id, full_name: u.full_name, email: u.email, role: u.role, student_id: u.student_id, registered_photo: u.registered_photo }))
@@ -38,7 +42,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   async function login(email: string, password: string) {
     const res = await api.login({ email, password });
-    api.setToken(res.access_token);
+    api.setToken(res.access_token, res.refresh_token);
     setUser({ id: res.user.id, full_name: res.user.full_name, email: res.user.email, role: res.user.role, student_id: res.user.student_id, registered_photo: res.user.registered_photo });
   }
 
@@ -47,7 +51,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   function logout() {
-    api.setToken(null);
+    api.setToken(null, null);
     setUser(null);
   }
 

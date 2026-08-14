@@ -72,7 +72,7 @@ export default function AdminSessionDetailPage() {
   if (loading) {
     return (
       <ProtectedRoute role="admin">
-        <div className="p-6 max-w-5xl mx-auto">
+        <div>
           <div className="skeleton h-6 w-32 mb-6" />
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
             {[...Array(4)].map((_, i) => <div key={i} className="skeleton h-28 rounded-xl" />)}
@@ -99,7 +99,7 @@ export default function AdminSessionDetailPage() {
 
   return (
     <ProtectedRoute role="admin">
-      <div className="p-6 max-w-5xl mx-auto animate-fade-in">
+      <div className="animate-fade-in">
         <Link href="/admin/reports" className="text-sm text-slate-500 hover:text-slate-700 inline-flex items-center gap-1 mb-6">
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
@@ -149,27 +149,7 @@ export default function AdminSessionDetailPage() {
               {session.score != null ? `${Math.round(session.score)}%` : "N/A"}
             </p>
           </div>
-          <div className="stat-card">
-            <p className="text-xs text-slate-500 uppercase tracking-wide font-medium mb-1">Suspicion Score</p>
-            <div className="mt-1">
-              <div className="flex items-center gap-3">
-                <div className="flex-1 bg-slate-100 rounded-full h-3">
-                  <div
-                    className={`h-3 rounded-full transition-all duration-700 ${
-                      session.suspicion_score >= 85 ? "bg-red-500" :
-                      session.suspicion_score >= 60 ? "bg-amber-500" :
-                      session.suspicion_score >= 30 ? "bg-orange-400" :
-                      "bg-emerald-500"
-                    }`}
-                    style={{ width: `${Math.min(session.suspicion_score || 0, 100)}%` }}
-                  />
-                </div>
-                <span className="text-xl font-bold text-slate-900">
-                  {Math.round(session.suspicion_score || 0)}%
-                </span>
-              </div>
-            </div>
-          </div>
+          
         </div>
 
         {/* ── Grade / release result ─────────────────────────────────── */}

@@ -22,7 +22,7 @@ export default function AdminExamDetailPage() {
   if (loading) {
     return (
       <ProtectedRoute role="admin">
-        <div className="p-6 max-w-4xl mx-auto">
+        <div>
           <div className="skeleton h-6 w-32 mb-6" />
           <div className="skeleton h-8 w-64 mb-2" />
           <div className="skeleton h-4 w-48 mb-8" />
@@ -47,7 +47,7 @@ export default function AdminExamDetailPage() {
 
   return (
     <ProtectedRoute role="admin">
-      <div className="p-6 max-w-4xl mx-auto animate-fade-in">
+      <div className="animate-fade-in">
         <Link href="/admin/exams" className="text-sm text-slate-500 hover:text-slate-700 inline-flex items-center gap-1 mb-6">
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18" />

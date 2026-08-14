@@ -31,7 +31,7 @@ export default function StudentDashboard() {
 
   return (
     <ProtectedRoute role="student">
-      <div className="max-w-6xl mx-auto space-y-8 animate-fade-in">
+      <div className="space-y-8 animate-fade-in">
         {/* Welcome Banner */}
         <div className="relative overflow-hidden bg-gradient-to-br from-primary via-blue-600 to-indigo-700 text-white rounded-3xl p-6 sm:p-8 shadow-xl shadow-primary/10">
           <div className="absolute right-0 top-0 bottom-0 w-1/3 bg-white/5 skew-x-12 pointer-events-none" />
