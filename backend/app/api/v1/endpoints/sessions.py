@@ -18,7 +18,7 @@ from pydantic import BaseModel
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 SNAPSHOT_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))),
     "snapshots",
 )
 os.makedirs(SNAPSHOT_DIR, exist_ok=True)
@@ -166,7 +166,8 @@ def log_proctoring_event(
         raise HTTPException(status_code=400, detail=f"Invalid event type: {payload.event_type}")
 
     snapshot_path = None
-    if payload.snapshot:
+    # tab_switch is logged but intentionally gets NO snapshot (client-side event)
+    if payload.snapshot and etype != EventType.tab_switch:
         frame = _decode_frame(payload.snapshot)
         if frame is not None:
             snapshot_path = _save_snapshot(session_id, frame, etype.value)

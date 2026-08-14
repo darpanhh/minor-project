@@ -13,6 +13,7 @@ export function serverUrl(path?: string | null): string {
 
 class ApiClient {
   private token: string | null = null;
+  private refreshing: Promise<string | null> | null = null;
 
   constructor() {
     if (typeof window !== "undefined") {
@@ -20,24 +21,72 @@ class ApiClient {
     }
   }
 
-  setToken(token: string | null) {
+  setToken(token: string | null, refreshToken?: string | null) {
     this.token = token;
     if (typeof window !== "undefined") {
       if (token) localStorage.setItem("access_token", token);
       else localStorage.removeItem("access_token");
+      if (refreshToken !== undefined) {
+        if (refreshToken) localStorage.setItem("refresh_token", refreshToken);
+        else localStorage.removeItem("refresh_token");
+      }
     }
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async refreshAccessToken(): Promise<string | null> {
+    if (typeof window === "undefined") return null;
+    if (!this.refreshing) {
+      this.refreshing = this.doRefresh();
+    }
+    return this.refreshing;
+  }
+
+  private async doRefresh(): Promise<string | null> {
+    try {
+      const refreshToken = localStorage.getItem("refresh_token");
+      if (!refreshToken) throw new Error("No refresh token");
+      const res = await fetch(`${API_BASE}/auth/token/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      });
+      if (!res.ok) throw new Error("Refresh failed");
+      const data = await res.json();
+      this.setToken(data.access_token);
+      return data.access_token;
+    } catch {
+      this.setToken(null, null);
+      if (typeof window !== "undefined") window.location.href = "/login";
+      return null;
+    } finally {
+      this.refreshing = null;
+    }
+  }
+
+  private async doFetch(method: string, path: string, token: string | null, body?: unknown): Promise<Response> {
     const headers: Record<string, string> = {};
     if (body) headers["Content-Type"] = "application/json";
-    if (this.token) headers["Authorization"] = `Bearer ${this.token}`;
-
-    const res = await fetch(`${API_BASE}${path}`, {
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    return fetch(`${API_BASE}${path}`, {
       method,
       headers,
       body: body ? JSON.stringify(body) : undefined,
     });
+  }
+
+  private async doFetchForm(method: string, path: string, token: string | null, form: FormData): Promise<Response> {
+    const headers: Record<string, string> = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    return fetch(`${API_BASE}${path}`, { method, headers, body: form });
+  }
+
+  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    let res = await this.doFetch(method, path, this.token, body);
+
+    if (res.status === 401 && this.token) {
+      const newToken = await this.refreshAccessToken();
+      if (newToken) res = await this.doFetch(method, path, newToken, body);
+    }
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: "Unknown error" }));
@@ -49,9 +98,13 @@ class ApiClient {
   }
 
   private async requestForm<T>(method: string, path: string, form: FormData): Promise<T> {
-    const headers: Record<string, string> = {};
-    if (this.token) headers["Authorization"] = `Bearer ${this.token}`;
-    const res = await fetch(`${API_BASE}${path}`, { method, headers, body: form });
+    let res = await this.doFetchForm(method, path, this.token, form);
+
+    if (res.status === 401 && this.token) {
+      const newToken = await this.refreshAccessToken();
+      if (newToken) res = await this.doFetchForm(method, path, newToken, form);
+    }
+
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: "Unknown error" }));
       const detail = Array.isArray(err.detail) ? err.detail.map((d: any) => d.msg).join("; ") : err.detail;

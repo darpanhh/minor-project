@@ -28,7 +28,7 @@ export default function AdminExamsPage() {
 
   return (
     <ProtectedRoute role="admin">
-      <div className="p-6 max-w-5xl mx-auto animate-fade-in">
+      <div className="animate-fade-in">
         <div className="flex items-center justify-between mb-8">
           <div>
             <h1 className="text-2xl font-bold text-slate-900">Manage Exams</h1>

@@ -24,9 +24,29 @@ _DEFAULT_WEIGHTS = {
     "right_horizontal": 0.20,
     "left_vertical": 0.12,
     "right_vertical": 0.12,
-    "yaw": 0.20,
-    "pitch": 0.12,
+    "yaw": 0.18,
+    "pitch": 0.14,
     "roll": 0.04,
+}
+
+# Per-metric normalisation scale used to bring every feature onto a
+# comparable ~[0,1] scale before the weighted Euclidean distance is
+# computed.
+#
+# This is the key to accurate gaze classification.  Raw eye-iris ratios
+# live in [0, 1] while head angles live in degrees, so without scaling a
+# small head rotation (a few degrees) swamps the eye-gaze signal entirely
+# and the "closest point" is decided almost purely by yaw/pitch.  With
+# these scales a deviation of one scale unit along any metric contributes
+# equally, so the iris position actually moves the classification.
+_METRIC_SCALES = {
+    "left_horizontal": 0.20,
+    "right_horizontal": 0.20,
+    "left_vertical": 0.15,
+    "right_vertical": 0.15,
+    "yaw": 25.0,
+    "pitch": 20.0,
+    "roll": 15.0,
 }
 
 # Tolerance margin applied around the centre calibration point.
@@ -61,6 +81,7 @@ class GazeEstimator:
 
     def __init__(self, weights: dict[str, float] | None = None, margin_factor: float = MARGIN_FACTOR):
         self.weights = weights or dict(_DEFAULT_WEIGHTS)
+        self.metric_scales = dict(_METRIC_SCALES)
         self.margin_factor = margin_factor
 
     def compare(self, calibration_profile: dict, current_features: dict) -> dict:
@@ -98,7 +119,11 @@ class GazeEstimator:
                 actual = current_features.get(key)
                 if expected is not None and actual is not None:
                     diff = actual - expected
-                    diff_sum += weight * diff * diff
+                    scale = self.metric_scales.get(key, 1.0)
+                    if scale <= 0:
+                        scale = 1.0
+                    norm_diff = diff / scale
+                    diff_sum += weight * norm_diff * norm_diff
                     total_weight += weight
 
             if total_weight > 0:
@@ -204,9 +229,10 @@ class GazeEstimator:
     def _distance_to_confidence(distance: float) -> float:
         if distance == float("inf"):
             return 0.0
-        # Calibrated to the typical feature-space spacing between calibration
-        # points (~5 units): a perfect match scores 1.0, a half-way-toward-the
-        # next-point gaze scores ~0.5, and being clearly on the adjacent point
-        # scores ~0.25.
-        c = math.exp(-distance / 5.0)
+        # The feature-space distance is normalised so that one scale unit
+        # corresponds to a meaningful deviation along a single metric and a
+        # full step toward an adjacent calibration point is ~1.0-2.0 units.
+        # A perfect match scores 1.0, half-way-toward-the-next-point scores
+        # ~0.5, and being clearly on the adjacent point scores ~0.25.
+        c = math.exp(-distance / 1.5)
         return max(0.0, min(1.0, c))

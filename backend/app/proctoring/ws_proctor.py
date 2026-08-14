@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import uuid
+from collections import deque
 from datetime import datetime
 
 import cv2
@@ -85,6 +86,40 @@ def _save_snapshot(session_id: str, frame: np.ndarray, reason: str) -> str:
     fname = f"{session_id}_{reason}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
     cv2.imwrite(os.path.join(SNAPSHOT_DIR, fname), frame)
     return fname
+
+
+# Rolling frame history so a snapshot can be taken from the frame at the time a
+# violation STARTED (e.g. the actual gaze-away moment), not from the current
+# frame several seconds later when the student has already looked back.
+FRAME_BUFFER_MAXLEN = 15  # ~15s of history at the ~1 fps frame rate
+
+
+def _snapshot_frame_for_time(
+    frame_buffer: deque,
+    start_ts: float,
+    fallback_frame: np.ndarray,
+) -> np.ndarray:
+    """Return the first buffered frame recorded at/after `start_ts`.
+
+    Falls back to `fallback_frame` (the current frame) if nothing is available.
+    """
+    for ts, b64 in frame_buffer:
+        if ts >= start_ts:
+            decoded = _decode_frame(b64)
+            if decoded is not None:
+                return decoded
+    return fallback_frame
+
+
+def _object_violation_active(result: dict) -> bool:
+    """True if a phone / multiple-persons violation is in the CURRENT frame.
+
+    Only suppress gaze-away/looking-down when an object violation is actually
+    visible right now (a phone in hand is primarily a phone violation). Gaze
+    events are NOT suppressed by historical/lingering object states, so genuine
+    gaze-away snapshots are always taken.
+    """
+    return bool(result.get("phone_detected")) or (result.get("person_count") or 0) > 1
 
 
 def _persist_event(
@@ -201,7 +236,10 @@ async def proctor_ws(
     # reason -> {"first_seen": timestamp, "last_seen": timestamp, "confirmed": bool, "logged_once": bool, "last_log_time": timestamp}
     violation_states: dict[str, dict] = {}
 
-    # ── Initialise gaze/head tracking with this session's calibration ──
+    # Recent frames (timestamp, base64) used to snapshot the violation-start moment
+    frame_buffer: deque[tuple[float, str]] = deque(maxlen=FRAME_BUFFER_MAXLEN)
+
+    # Initialise gaze/head tracking with this session's calibration
     gaze_service = GazeService()
     _load_calibration(gaze_service, session_uuid)
 
@@ -216,6 +254,10 @@ async def proctor_ws(
                 frame = _decode_frame(frame_data)
                 if frame is None:
                     continue
+
+                # Record this frame in the rolling history (before processing,
+                # so its timestamp aligns with the "now" used for violations).
+                frame_buffer.append((datetime.now().timestamp(), frame_data))
             except json.JSONDecodeError:
                 logger.warning("Proctor WS: received invalid JSON from session %s", session_uuid)
                 continue
@@ -241,7 +283,16 @@ async def proctor_ws(
 
             # --- State tracking for warning-first logic ---
             now_ts = datetime.now().timestamp()
-            current_reasons = set(result.get("snapshot_reasons", []))
+            # Derive active reasons from the per-frame detection flags (NOT from
+            # the detector's throttled snapshot_reasons, which only appears once
+            # per 10s and would break continuity/confirmation).
+            current_reasons = set()
+            if result.get("phone_detected"):
+                current_reasons.add("phone_detected")
+            if (result.get("person_count") or 0) > 1:
+                current_reasons.add("multiple_persons")
+            if (result.get("person_count") or 0) == 0:
+                current_reasons.add("person_absent")
 
             # Clean up stale violation states where the violation has stopped for > 5 seconds
             stale_reasons = []
@@ -280,7 +331,8 @@ async def proctor_ws(
                     base_msg = "No person detected in frame."
                     print("[DETECTOR] No person detected in frame.")
 
-                if active_duration < 4.0:
+                grace_sec = 5.0 if r == "person_absent" else 2.0
+                if active_duration < grace_sec:
                     # Within warning grace period: warn on-screen, DO NOT log to DB
                     warn_msg = f"WARNING: {base_msg} Please ensure you are alone and put away all devices."
                     modified_alerts.append({
@@ -319,30 +371,40 @@ async def proctor_ws(
                 db = SessionLocal()
                 try:
                     for reason in confirmed_snapshot_reasons:
-                        fname = _save_snapshot(str(session_uuid), frame, reason)
-                        snapshot_url = f"/snapshots/{fname}"
-                        snapshots.append(snapshot_url)
+                        try:
+                            # Snapshot the frame from when this violation first appeared
+                            state = violation_states.get(reason, {})
+                            start_ts = state.get("first_seen", now_ts)
+                            snap_frame = _snapshot_frame_for_time(frame_buffer, start_ts, frame)
+                            fname = _save_snapshot(str(session_uuid), snap_frame, reason)
+                            snapshot_url = f"/snapshots/{fname}"
+                            snapshots.append(snapshot_url)
 
-                        # Map reason → EventType and persist
-                        etype = ALERT_TO_EVENT_TYPE.get(reason)
-                        if etype:
-                            # Use the highest confidence from matching detections
-                            # Use dynamic class IDs from the loaded model (works with any weights)
-                            conf = 0.0
-                            target_class = None
-                            if reason == "phone_detected":
-                                target_class = detector.phone_class_id
-                            elif reason == "multiple_persons":
-                                target_class = detector.person_class_id
-                            
-                            if target_class is not None:
-                                for det in result["detections"]:
-                                    if det["class_id"] == target_class and det["confidence"] > conf:
-                                        conf = det["confidence"]
-                            else:
-                                conf = 1.0 # default for person absent
-                            
-                            _persist_event(db, session_uuid, etype, conf, snapshot_url)
+                            # Map reason → EventType and persist
+                            etype = ALERT_TO_EVENT_TYPE.get(reason)
+                            if etype:
+                                # Use the highest confidence from matching detections
+                                # Use dynamic class IDs from the loaded model (works with any weights)
+                                conf = 0.0
+                                target_class = None
+                                if reason == "phone_detected":
+                                    target_class = detector.phone_class_id
+                                elif reason == "multiple_persons":
+                                    target_class = detector.person_class_id
+
+                                if target_class is not None:
+                                    for det in result["detections"]:
+                                        if det["class_id"] == target_class and det["confidence"] > conf:
+                                            conf = det["confidence"]
+                                else:
+                                    conf = 1.0 # default for person absent
+
+                                _persist_event(db, session_uuid, etype, conf, snapshot_url)
+                        except Exception:
+                            logger.exception(
+                                "Failed to process confirmed violation reason %s for session %s",
+                                reason, session_uuid,
+                            )
                     
                     evaluate_and_alert(db, session_uuid)
                 finally:
@@ -353,21 +415,24 @@ async def proctor_ws(
             if gaze_events:
                 db_gaze = SessionLocal()
                 try:
-                    # If a primary object violation like phone_detected or multiple_persons
-                    # is active in the CURRENT frame, do not record redundant gaze_away
-                    # events (which would produce snapshots mislabeled "gaze away" for
-                    # what is actually a phone violation). Uses the frame-accurate
-                    # per-frame flags, not the throttled snapshot_reasons list.
-                    object_violation_active = (
-                        bool(result.get("phone_detected"))
-                        or (result.get("person_count") or 0) > 1
-                    )
+                    # A primary object violation (phone / multiple persons) in the
+                    # CURRENT frame overrides GAZE_AWAY / LOOKING_DOWN: looking at
+                    # a phone naturally produces those, so they must not be
+                    # recorded as separate (mislabeled) "gaze away" events.
                     for ev in gaze_events:
-                        if object_violation_active and ev["violation_type"] in ("GAZE_AWAY", "LOOKING_DOWN"):
-                            logger.info("Suppressing gaze event %s due to active object detection", ev["violation_type"])
+                        if ev["violation_type"] in ("GAZE_AWAY", "LOOKING_DOWN") and _object_violation_active(result):
+                            logger.info("Suppressing gaze event %s while object visible", ev["violation_type"])
                             continue
 
-                        fname = _save_snapshot(str(session_uuid), frame, ev["violation_type"])
+                        # Snapshot the frame from when the violation actually
+                        # started (e.g. the moment the student looked away),
+                        # not the current frame after they may have looked back.
+                        snap_frame = _snapshot_frame_for_time(
+                            frame_buffer,
+                            ev.get("start_time", now_ts),
+                            frame,
+                        )
+                        fname = _save_snapshot(str(session_uuid), snap_frame, ev["violation_type"])
                         snapshot_url = f"/snapshots/{fname}"
                         _persist_event(db_gaze, session_uuid, ev["event_type"], ev["confidence"], snapshot_url)
                         logger.info(
