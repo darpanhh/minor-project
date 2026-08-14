@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     JWT_ACCESS_EXPIRE_MINUTES: int = 30
     JWT_REFRESH_EXPIRE_DAYS: int = 7
     UPLOAD_DIR: str = "uploads"
-    MODEL_PATH: str = "best.pt"
+    MODEL_PATH: str = "yolov8n.pt"
 
     DEBUG: bool = False
 

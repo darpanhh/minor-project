@@ -8,9 +8,6 @@ _METRIC_KEYS = [
     "right_horizontal",
     "left_vertical",
     "right_vertical",
-    "yaw",
-    "pitch",
-    "roll",
 ]
 
 _GAZE_ZONES = [
@@ -19,14 +16,13 @@ _GAZE_ZONES = [
     "bottom_left", "bottom_center", "bottom_right",
 ]
 
+# Only the eye features are used for the gaze comparison — head-pose values
+# are not calibrated or compared.
 _DEFAULT_WEIGHTS = {
-    "left_horizontal": 0.20,
-    "right_horizontal": 0.20,
-    "left_vertical": 0.12,
-    "right_vertical": 0.12,
-    "yaw": 0.20,
-    "pitch": 0.12,
-    "roll": 0.04,
+    "left_horizontal": 0.25,
+    "right_horizontal": 0.25,
+    "left_vertical": 0.25,
+    "right_vertical": 0.25,
 }
 
 # Tolerance margin applied around the centre calibration point.
@@ -41,8 +37,8 @@ _DEFAULT_WEIGHTS = {
 # Only when the student clearly commits to an edge/away zone (a much larger
 # distance to centre than to the away point) does the violation trigger.
 #
-# The geometric interpretation: with the 3x3 calibration grid, the centre zone
-# expands to ~60% of the way toward any adjacent zone before a violation fires.
+# With the 4-corner calibration grid, the virtual centre expands to ~60% of
+# the way toward any corner before a violation fires.
 MARGIN_FACTOR = 1.85
 
 
@@ -51,7 +47,7 @@ class GazeEstimator:
     Compares current eye/head features against a stored calibration profile
     to estimate where the student is looking.
 
-    The comparison uses a weighted Euclidean distance across all 7 metrics.
+    The comparison uses a weighted Euclidean distance across all 4 eye metrics.
     The closest calibration point (lowest distance) is selected as the
     predicted gaze target.
 
@@ -86,7 +82,13 @@ class GazeEstimator:
         """
         distances: dict[str, float] = {}
 
-        for point_name, point_data in calibration_profile.items():
+        profile = calibration_profile
+        if profile.get("center") is None:
+            centre = self._derive_centre(profile)
+            if centre is not None:
+                profile = {**profile, "center": centre}
+
+        for point_name, point_data in profile.items():
             if point_name not in _GAZE_ZONES:
                 continue
 
@@ -157,6 +159,28 @@ class GazeEstimator:
             "confidence": confidence,
             "distances": distances,
             "all_scores": all_scores,
+        }
+
+    @staticmethod
+    def _derive_centre(profile: dict) -> dict | None:
+        """Derive a virtual centre point from the 4 corner calibration points.
+
+        Only the corners are calibrated; the centre reference is the mean of
+        the corner feature values, which the margin logic below uses so that a
+        student looking at screen centre is not flagged as gazing away.
+        """
+        corners = [
+            profile[pn]
+            for pn in ("top_left", "top_right", "bottom_left", "bottom_right")
+            if pn in profile
+        ]
+        if not corners:
+            return None
+        return {
+            key: sum(p[key] for p in corners if p.get(key) is not None)
+            / sum(1 for p in corners if p.get(key) is not None)
+            for key in _METRIC_KEYS
+            if sum(1 for p in corners if p.get(key) is not None) > 0
         }
 
     def compare_unsafe(self, current_features: dict) -> dict | None:

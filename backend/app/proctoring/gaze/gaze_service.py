@@ -32,6 +32,11 @@ _HEAD_TURN_YAW_THRESHOLD = 38.0
 _LOOKING_DOWN_PITCH_THRESHOLD = -35.0
 _LOOKING_OFF_SCREEN_TIMEOUT = 3.0
 
+# When a calibrated head profile is available, a HEAD_TURN is flagged when the
+# yaw deviates from the calibrated "forward" yaw by more than the maximum
+# calibrated left/right turn plus this margin (degrees).
+_HEAD_TURN_CALIB_MARGIN = 10.0
+
 _EVENT_COOLDOWN_SEC = 10.0
 
 
@@ -59,6 +64,7 @@ class GazeService:
         self.estimator = GazeEstimator()
 
         self.calibration_profile: dict | None = None
+        self._head_profile: dict | None = None
 
         self._buffer: deque = deque(maxlen=_SMOOTHING_BUFFER_SIZE)
         self._smoothed_point: str | None = None
@@ -87,6 +93,7 @@ class GazeService:
 
     def load_calibration(self, profile: dict) -> None:
         self.calibration_profile = profile
+        self._head_profile = profile.get("head") if profile else None
         logger.info("GazeService: loaded calibration (%d points)", len(profile))
 
     def process_frame(self, frame) -> dict:
@@ -283,11 +290,11 @@ class GazeService:
             active_violations.discard("GAZE_AWAY")
 
         # ── HEAD_TURN ──────────────────────────────────────────────
-        if yaw is not None and abs(yaw) > _HEAD_TURN_YAW_THRESHOLD:
+        if yaw is not None and self._is_head_turn(yaw):
             active_violations.add("HEAD_TURN")
 
         # ── LOOKING_DOWN ───────────────────────────────────────────
-        if pitch is not None and pitch < _LOOKING_DOWN_PITCH_THRESHOLD:
+        if pitch is not None and self._is_looking_down(pitch):
             active_violations.add("LOOKING_DOWN")
 
         self._update_violation_state("GAZE_AWAY", "GAZE_AWAY" in active_violations, now)
@@ -295,6 +302,27 @@ class GazeService:
         self._update_violation_state("LOOKING_DOWN", "LOOKING_DOWN" in active_violations, now)
 
         self._clear_non_matching_violations(active_violations)
+
+    def _is_head_turn(self, yaw: float) -> bool:
+        head = self._head_profile or {}
+        forward = (head.get("forward") or {}).get("yaw")
+        left = (head.get("left") or {}).get("yaw")
+        right = (head.get("right") or {}).get("yaw")
+
+        if forward is not None and left is not None and right is not None:
+            max_turn = max(abs(left - forward), abs(right - forward))
+            return abs(yaw - forward) > max_turn + _HEAD_TURN_CALIB_MARGIN
+
+        return abs(yaw) > _HEAD_TURN_YAW_THRESHOLD
+
+    def _is_looking_down(self, pitch: float) -> bool:
+        head = self._head_profile or {}
+        forward_pitch = (head.get("forward") or {}).get("pitch")
+
+        if forward_pitch is not None:
+            return pitch < forward_pitch + _LOOKING_DOWN_PITCH_THRESHOLD
+
+        return pitch < _LOOKING_DOWN_PITCH_THRESHOLD
 
     def _update_violation_state(self, vtype: str, is_active: bool, now: float) -> None:
         vs = self._violations[vtype]

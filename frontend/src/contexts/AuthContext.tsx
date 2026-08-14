@@ -24,7 +24,7 @@ const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(() => typeof window === "undefined" || !localStorage.getItem("access_token"));
+  const [loading, setLoading] = useState(() => typeof window === "undefined" || !!localStorage.getItem("access_token"));
 
   useEffect(() => {
     const token = localStorage.getItem("access_token");

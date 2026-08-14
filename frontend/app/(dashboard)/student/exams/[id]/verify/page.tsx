@@ -33,21 +33,31 @@ interface CheckItem {
   status: "pending" | "in_progress" | "complete" | "error";
 }
 
-const CALIBRATION_POINTS = [
+interface CalibrationPoint {
+  id: string;
+  label: string;
+  x?: number;
+  y?: number;
+  image?: string;
+}
+
+const EYE_CALIBRATION_POINTS: CalibrationPoint[] = [
   { id: "top_left", label: "Top Left", x: 5, y: 6 },
-  { id: "top_center", label: "Top Center", x: 50, y: 6 },
   { id: "top_right", label: "Top Right", x: 95, y: 6 },
-  { id: "middle_left", label: "Middle Left", x: 5, y: 50 },
-  { id: "center", label: "Center", x: 50, y: 50 },
-  { id: "middle_right", label: "Middle Right", x: 95, y: 50 },
   { id: "bottom_left", label: "Bottom Left", x: 5, y: 94 },
-  { id: "bottom_center", label: "Bottom Center", x: 50, y: 94 },
   { id: "bottom_right", label: "Bottom Right", x: 95, y: 94 },
+];
+
+const HEAD_CALIBRATION_POINTS: CalibrationPoint[] = [
+  { id: "head_forward", label: "Forward", image: "/forward.jpeg" },
+  { id: "head_left", label: "Left", image: "/left.jpeg" },
+  { id: "head_right", label: "Right", image: "/right.jpeg" },
 ];
 
 const WS_BASE =
   process.env.NEXT_PUBLIC_PROCTOR_WS_URL || "ws://localhost:8000/ws/proctor";
-const FRAMES_PER_POINT = 30;
+// ~2s per calibration point (20 frames at 100ms) — stays under the 3s limit.
+const FRAMES_PER_POINT = 20;
 const CAPTURE_INTERVAL_MS = 100;
 
 export default function VerifyPage() {
@@ -60,6 +70,8 @@ export default function VerifyPage() {
     { id: "room", label: "Room Scan", description: "Detecting surroundings...", icon: "room_preferences", status: "pending" },
   ]);
   const [phase, setPhase] = useState<"checks" | "calibration" | "complete">("checks");
+  const [activeSet, setActiveSet] = useState<"eye" | "head">("eye");
+  const [points, setPoints] = useState<CalibrationPoint[]>(EYE_CALIBRATION_POINTS);
   const [calibrationPointIndex, setCalibrationPointIndex] = useState(0);
   const [capturedFrames, setCapturedFrames] = useState(0);
   const [session, setSession] = useState<any>(null);
@@ -68,6 +80,27 @@ export default function VerifyPage() {
   const wsRef = useRef<WebSocket | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const calibratingRef = useRef(true);
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(() =>
+    typeof document !== "undefined" && !!document.fullscreenElement
+  );
+
+  // ── Track fullscreen state ─────────────────────────────────────
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+
+  const enterFullscreen = useCallback(async () => {
+    try {
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen();
+      }
+      setIsFullscreen(true);
+    } catch (err) {
+      console.error("Fullscreen request failed:", err);
+    }
+  }, []);
 
   // ── Existing verification checks (unchanged logic) ─────────────
   useEffect(() => {
@@ -181,13 +214,17 @@ export default function VerifyPage() {
     const ws = wsRef.current;
     const video = videoRef.current;
     if (!ws || !video || ws.readyState !== WebSocket.OPEN) return;
+    if (!document.fullscreenElement) return;
 
-    const point = CALIBRATION_POINTS[calibrationPointIndex];
+    const point = points[calibrationPointIndex];
     setCapturing(true);
     setCapturedFrames(0);
 
+    let framesCaptured = 0;
     for (let f = 0; f < FRAMES_PER_POINT; f++) {
       if (!calibratingRef.current) return;
+      // Abort capture if the student leaves fullscreen mid-recording.
+      if (!document.fullscreenElement) break;
       const captureCanvas = document.createElement("canvas");
       captureCanvas.width = video.videoWidth || 640;
       captureCanvas.height = video.videoHeight || 480;
@@ -202,32 +239,47 @@ export default function VerifyPage() {
           })
         );
       }
-      setCapturedFrames(f + 1);
+      framesCaptured = f + 1;
+      setCapturedFrames(framesCaptured);
       await new Promise((r) => setTimeout(r, CAPTURE_INTERVAL_MS));
     }
     setCapturing(false);
+    // Incomplete capture (e.g. left fullscreen) — require a fresh recording.
+    if (framesCaptured < FRAMES_PER_POINT) {
+      setCapturedFrames(0);
+    }
   }
 
   function nextPoint() {
     const next = calibrationPointIndex + 1;
-    if (next >= CALIBRATION_POINTS.length) {
-      wsRef.current?.close();
-      wsRef.current = null;
-      if (mediaStreamRef.current) {
-        mediaStreamRef.current.getTracks().forEach((t) => t.stop());
-        mediaStreamRef.current = null;
+    if (next >= points.length) {
+      if (activeSet === "eye") {
+        setActiveSet("head");
+        setPoints(HEAD_CALIBRATION_POINTS);
+        setCalibrationPointIndex(0);
+        setCapturedFrames(0);
+      } else {
+        wsRef.current?.close();
+        wsRef.current = null;
+        if (mediaStreamRef.current) {
+          mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+          mediaStreamRef.current = null;
+        }
+        setPhase("complete");
       }
-      setPhase("complete");
     } else {
       setCalibrationPointIndex(next);
       setCapturedFrames(0);
     }
   }
 
-  const currentPoint =
-    calibrationPointIndex < CALIBRATION_POINTS.length
-      ? CALIBRATION_POINTS[calibrationPointIndex]
-      : null;
+  const currentPoint = points[calibrationPointIndex] ?? null;
+
+  // Total progress across both calibration stages (eye then head).
+  const calibrationTotal =
+    (activeSet === "head" ? 1 : 0) +
+    (calibrationPointIndex + capturedFrames / FRAMES_PER_POINT) / points.length;
+  const overallProgress = (calibrationTotal / 2) * 100;
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
@@ -338,38 +390,77 @@ export default function VerifyPage() {
           />
           <div className="absolute inset-0 bg-gradient-to-b from-slate-950/80 via-transparent to-slate-950/90 pointer-events-none" />
 
+          {/* Fullscreen Gate — block calibration until fullscreen */}
+          {!isFullscreen && (
+            <div className="absolute inset-0 z-[60] bg-slate-950/95 backdrop-blur-md flex items-center justify-center p-6">
+              <div className="bg-slate-900 border border-slate-700/80 rounded-2xl p-8 max-w-sm w-full text-center space-y-4 shadow-2xl">
+                <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-400/30 flex items-center justify-center mx-auto text-cyan-400">
+                  <span className="material-symbols-outlined text-3xl">fullscreen</span>
+                </div>
+                <h3 className="text-white text-lg font-bold">Fullscreen Required</h3>
+                <p className="text-slate-400 text-sm leading-relaxed">
+                  Calibration must be performed in fullscreen mode. Enter fullscreen to continue.
+                </p>
+                <button
+                  onClick={enterFullscreen}
+                  className="w-full py-3 bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white font-semibold rounded-xl text-sm transition shadow-lg shadow-cyan-500/25 flex items-center justify-center gap-2"
+                >
+                  <span className="material-symbols-outlined text-base">fullscreen</span>
+                  Enter Fullscreen
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Floating Top Banner */}
           <div className="relative z-20 bg-slate-900/90 backdrop-blur-xl border border-slate-800 rounded-full px-6 py-2.5 shadow-2xl flex items-center gap-3 text-white text-sm font-medium">
             <span className="w-2.5 h-2.5 rounded-full bg-blue-500 animate-ping" />
-            <span>Look directly at the <strong className="text-blue-400 font-bold capitalize">{currentPoint?.label || ""}</strong> point dot</span>
+            {activeSet === "head" ? (
+              <span>
+                Head calibration — look <strong className="text-cyan-400 font-bold uppercase">{currentPoint?.label || ""}</strong> exactly as shown
+              </span>
+            ) : (
+              <span>Look directly at the <strong className="text-blue-400 font-bold capitalize">{currentPoint?.label || ""}</strong> point dot</span>
+            )}
           </div>
 
-          {/* Calibration Target Dot */}
-          {currentPoint && (
-            <div
-              className="absolute z-30 transition-all duration-300 ease-out"
-              style={{
-                left: `${currentPoint.x}%`,
-                top: `${currentPoint.y}%`,
-                transform: "translate(-50%, -50%)",
-              }}
-            >
-              <div className="relative flex items-center justify-center">
-                {/* Outer glowing pulsing ring */}
-                <div className="absolute -inset-4 rounded-full bg-blue-500/20 border-2 border-blue-500/80 animate-ping" />
-                <div className="absolute -inset-2 rounded-full border border-cyan-400/60 animate-pulse" />
-                {/* Center dot */}
-                <div className="w-7 h-7 bg-gradient-to-tr from-blue-600 to-cyan-400 rounded-full shadow-[0_0_20px_rgba(56,189,248,0.8)] border-2 border-white flex items-center justify-center text-[10px] font-bold text-slate-950">
-                  {calibrationPointIndex + 1}
+          {/* Calibration Target */}
+          {currentPoint?.image ? (
+            <div className="relative z-30 w-64 h-64 md:w-72 md:h-72 rounded-2xl overflow-hidden border-2 border-cyan-400/60 shadow-[0_0_40px_rgba(34,211,238,0.35)]">
+              {/* eslint-disable-next-line @next/next/no-img-element -- static calibration guide image from /public */}
+              <img
+                src={currentPoint.image}
+                alt={`Look ${currentPoint.label}`}
+                className="w-full h-full object-cover"
+              />
+            </div>
+          ) : (
+            currentPoint && (
+              <div
+                className="absolute z-30 transition-all duration-300 ease-out"
+                style={{
+                  left: `${currentPoint.x}%`,
+                  top: `${currentPoint.y}%`,
+                  transform: "translate(-50%, -50%)",
+                }}
+              >
+                <div className="relative flex items-center justify-center">
+                  {/* Outer glowing pulsing ring */}
+                  <div className="absolute -inset-4 rounded-full bg-blue-500/20 border-2 border-blue-500/80 animate-ping" />
+                  <div className="absolute -inset-2 rounded-full border border-cyan-400/60 animate-pulse" />
+                  {/* Center dot */}
+                  <div className="w-7 h-7 bg-gradient-to-tr from-blue-600 to-cyan-400 rounded-full shadow-[0_0_20px_rgba(56,189,248,0.8)] border-2 border-white flex items-center justify-center text-[10px] font-bold text-slate-950">
+                    {calibrationPointIndex + 1}
+                  </div>
                 </div>
               </div>
-            </div>
+            )
           )}
 
           {/* Floating Bottom Control Toolbar */}
           <div className="relative z-20 bg-slate-900/90 backdrop-blur-xl border border-slate-800 rounded-2xl p-4 shadow-2xl flex flex-col items-center gap-3 max-w-md w-full mb-2">
             <div className="flex items-center justify-between w-full text-xs text-slate-400 px-1">
-              <span>Point {calibrationPointIndex + 1} of {CALIBRATION_POINTS.length} ({currentPoint?.label})</span>
+              <span>{activeSet === "head" ? "Head" : "Eye"} calibration · Point {calibrationPointIndex + 1} of {points.length} ({currentPoint?.label})</span>
               <span>{capturedFrames}/{FRAMES_PER_POINT} frames</span>
             </div>
 
@@ -377,7 +468,7 @@ export default function VerifyPage() {
               <div
                 className="bg-gradient-to-r from-blue-500 to-cyan-400 h-full transition-all duration-200"
                 style={{
-                  width: `${((calibrationPointIndex + (capturedFrames / FRAMES_PER_POINT)) / CALIBRATION_POINTS.length) * 100}%`,
+                  width: `${overallProgress}%`,
                 }}
               />
             </div>
@@ -388,15 +479,15 @@ export default function VerifyPage() {
                   onClick={captureCurrentPoint}
                   className="w-full py-2.5 bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white font-semibold rounded-xl text-sm transition shadow-lg shadow-blue-500/25 flex items-center justify-center gap-2"
                 >
-                  <span className="material-symbols-outlined text-base">center_focus_strong</span>
-                  Start Capture Point
+                  <span className="material-symbols-outlined text-base">{activeSet === "head" ? "screen_search_desktop" : "center_focus_strong"}</span>
+                  {activeSet === "head" ? "Start Head Pose Capture" : "Start Capture Point"}
                 </button>
               )}
 
               {capturing && (
                 <div className="w-full py-2.5 bg-slate-800/80 border border-slate-700 text-white rounded-xl text-sm flex items-center justify-center gap-2">
                   <div className="w-4 h-4 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin" />
-                  <span>Recording gaze data ({capturedFrames}/{FRAMES_PER_POINT})...</span>
+                  <span>Recording {activeSet === "head" ? "head pose" : "gaze"} data ({capturedFrames}/{FRAMES_PER_POINT})...</span>
                 </div>
               )}
 
@@ -405,7 +496,7 @@ export default function VerifyPage() {
                   onClick={nextPoint}
                   className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl text-sm transition shadow-lg shadow-emerald-600/25 flex items-center justify-center gap-2"
                 >
-                  <span>{calibrationPointIndex >= CALIBRATION_POINTS.length - 1 ? "Complete Calibration" : "Next Point"}</span>
+                  <span>{activeSet === "eye" && calibrationPointIndex >= points.length - 1 ? "Start Head Calibration" : calibrationPointIndex >= points.length - 1 ? "Complete Calibration" : "Next Point"}</span>
                   <span className="material-symbols-outlined text-base">arrow_forward</span>
                 </button>
               )}
@@ -420,7 +511,7 @@ export default function VerifyPage() {
           <div>
             <h2 className="text-2xl font-bold">Calibration Complete</h2>
             <p className="text-muted-foreground">
-              Your eye/head tracking has been calibrated. You can now
+              Your gaze tracking has been calibrated. You can now
               start the exam.
             </p>
           </div>
@@ -435,7 +526,7 @@ export default function VerifyPage() {
                   Calibration Complete
                 </p>
                 <p className="text-sm text-muted-foreground">
-                  All 9 calibration points have been recorded
+                  All 4 eye and 3 head calibration points have been recorded
                   successfully.
                 </p>
               </div>
