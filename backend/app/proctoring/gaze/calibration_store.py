@@ -1,20 +1,36 @@
-SAMPLES_PER_POINT = 30
+SAMPLES_PER_POINT = 20
 
-CALIBRATION_POINTS = [
-    "top_left", "top_center", "top_right",
-    "middle_left", "center", "middle_right",
-    "bottom_left", "bottom_center", "bottom_right",
+EYE_POINTS = [
+    "top_left", "top_right",
+    "bottom_left", "bottom_right",
 ]
 
-METRIC_KEYS = [
+HEAD_POINTS = [
+    "head_forward",
+    "head_left",
+    "head_right",
+]
+
+CALIBRATION_POINTS = EYE_POINTS + HEAD_POINTS
+
+EYE_METRIC_KEYS = [
     "left_horizontal",
     "right_horizontal",
     "left_vertical",
     "right_vertical",
+]
+
+HEAD_METRIC_KEYS = [
     "yaw",
     "pitch",
     "roll",
 ]
+
+
+def metric_keys_for(point):
+    if point in HEAD_POINTS:
+        return HEAD_METRIC_KEYS
+    return EYE_METRIC_KEYS
 
 
 class CalibrationStore:
@@ -36,7 +52,7 @@ class CalibrationStore:
             return
 
         sample = {}
-        for key in METRIC_KEYS:
+        for key in metric_keys_for(point):
             val = features.get(key)
             if val is not None:
                 sample[key] = val
@@ -65,7 +81,7 @@ class CalibrationStore:
         self._averages[point] = avg
 
         print(f"Calibration point completed: {point}")
-        for key in METRIC_KEYS:
+        for key in metric_keys_for(point):
             if key in avg:
                 name = key.replace("_", " ").title()
                 print(f"Average {name}: {avg[key]:.4f}")

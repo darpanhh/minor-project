@@ -7,52 +7,30 @@ from app.models.exam import ExamSession
 
 logger = logging.getLogger(__name__)
 
-CALIBRATION_POINTS = [
-    "top_left", "top_center", "top_right",
-    "middle_left", "center", "middle_right",
-    "bottom_left", "bottom_center", "bottom_right",
+# Eye calibration: only the 4 screen corners. A virtual centre point is derived
+# from these corners by the GazeEstimator at comparison time. Only the eye
+# features are stored — head-pose values are not used in the gaze comparison.
+# Head-pose calibration is captured separately (forward / left / right) and
+# stored under the profile's "head" key; it is used for HEAD_TURN /
+# LOOKING_DOWN detection in the GazeService.
+EYE_POINTS = [
+    "top_left", "top_right",
+    "bottom_left", "bottom_right",
 ]
 
-# How strongly each calibration point is nudged away from the exact value the
-# student produced while looking at the dot. The stored reference for every zone
-# is set *slightly different* from what was actually measured so the proctor has
-# a small buffer: e.g. the "top_left" reference gets a bit more "top" and a bit
-# more "left". Increase this value to make the offset more pronounced.
-CALIBRATION_OFFSET_DEG = 3.0
+HEAD_POINTS = [
+    "head_forward",
+    "head_left",
+    "head_right",
+]
 
-# Per-zone offset multipliers applied to the head-pose features before the
-# calibration profile is persisted. Feature sign conventions (see gaze_service /
-# head_pose):
-#   yaw   + = toward the student's LEFT,  - = toward the student's RIGHT
-#   pitch + = UP (top),                   - = DOWN (bottom)
-CALIBRATION_OFFSETS = {
-    "top_left":      {"yaw": 1.0, "pitch": 1.0},
-    "top_center":    {"yaw": 0.0, "pitch": 1.0},
-    "top_right":     {"yaw": -1.0, "pitch": 1.0},
-    "middle_left":   {"yaw": 1.0, "pitch": 0.0},
-    "center":        {"yaw": 0.0, "pitch": 0.0},
-    "middle_right":  {"yaw": -1.0, "pitch": 0.0},
-    "bottom_left":   {"yaw": 1.0, "pitch": -1.0},
-    "bottom_center": {"yaw": 0.0, "pitch": -1.0},
-    "bottom_right":  {"yaw": -1.0, "pitch": -1.0},
+CALIBRATION_POINTS = EYE_POINTS + HEAD_POINTS
+
+HEAD_STORE_KEY = {
+    "head_forward": "forward",
+    "head_left": "left",
+    "head_right": "right",
 }
-
-
-def apply_point_offset(point_name: str, averaged_features: dict) -> dict:
-    """Return a copy of *averaged_features* nudged slightly toward its zone.
-
-    Keeps the raw measured values untouched — the offset is only applied to the
-    stored calibration profile so it differs slightly from what was taken.
-    """
-    adjusted = dict(averaged_features)
-    offsets = CALIBRATION_OFFSETS.get(point_name, {})
-    yaw = adjusted.get("yaw")
-    pitch = adjusted.get("pitch")
-    if yaw is not None:
-        adjusted["yaw"] = yaw + offsets.get("yaw", 0.0) * CALIBRATION_OFFSET_DEG
-    if pitch is not None:
-        adjusted["pitch"] = pitch + offsets.get("pitch", 0.0) * CALIBRATION_OFFSET_DEG
-    return adjusted
 
 
 class CalibrationService:
@@ -106,15 +84,25 @@ class CalibrationService:
                 db.add(cal)
 
             profile = dict(cal.profile) if cal.profile else {}
-            profile[point_name] = apply_point_offset(point_name, averaged_features)
+
+            if point_name in HEAD_POINTS:
+                head = dict(profile.get("head", {}))
+                head[HEAD_STORE_KEY[point_name]] = dict(averaged_features)
+                profile["head"] = head
+            else:
+                profile[point_name] = dict(averaged_features)
+
             cal.profile = profile
 
             print(f"[CalibrationService] Saved {point_name} to database")
             print(f"[CalibrationService] Current profile keys: {list(profile.keys())}")
 
-            if len(profile) >= len(CALIBRATION_POINTS) and not cal.completed:
+            eye_done = all(p in profile for p in EYE_POINTS)
+            head = profile.get("head", {})
+            head_done = all(HEAD_STORE_KEY[p] in head for p in HEAD_POINTS)
+            if eye_done and head_done and not cal.completed:
                 cal.completed = True
-                print("[CalibrationService] All 9 points saved — calibration marked complete")
+                print("[CalibrationService] All eye and head points saved — calibration marked complete")
 
             db.commit()
             db.refresh(cal)

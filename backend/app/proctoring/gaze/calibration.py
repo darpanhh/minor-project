@@ -1,6 +1,6 @@
 from .feature_extractor import FeatureExtractor
 from .mediapipe_detector import MediaPipeDetector
-from .calibration_store import CalibrationStore
+from .calibration_store import CalibrationStore, SAMPLES_PER_POINT
 from app.services.calibration_service import CalibrationService
 
 
@@ -30,7 +30,7 @@ class CalibrationProcessor:
         count = self.store.sample_count(point)
         print(f"Point: {point}")
         print(f"Frame: {frame_number}")
-        print(f"Samples: {count}/30")
+        print(f"Samples: {count}/{SAMPLES_PER_POINT}")
         yaw = features.get("yaw")
         pitch = features.get("pitch")
         roll = features.get("roll")

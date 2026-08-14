@@ -12,6 +12,7 @@ export default function Home() {
     if (loading) return;
     if (!user) router.replace("/login");
     else if (user.role === "admin") router.replace("/admin/dashboard");
+    else if (user.role === "teacher") router.replace("/teacher/dashboard");
     else router.replace("/student/dashboard");
   }, [user, loading, router]);
 

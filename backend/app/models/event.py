@@ -16,6 +16,7 @@ class EventType(str, enum.Enum):
     tab_switch = "tab_switch"
     phone_detected = "phone_detected"
     person_absent = "person_absent"
+    fullscreen_exit = "fullscreen_exit"
 
 
 class Severity(str, enum.Enum):

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { api } from "@/src/services/api";
 import ProtectedRoute from "@/src/components/ProtectedRoute";
@@ -13,6 +13,7 @@ export default function TakeExamPage() {
   const streamRef = useRef<MediaStream | null>(null);
 
   const firstSwitchRef = useRef(false);
+  const fullscreenExitedRef = useRef(false);
   const handleSubmitRef = useRef<(() => void) | null>(null);
 
   const [exam, setExam] = useState<any>(null);
@@ -25,6 +26,10 @@ export default function TakeExamPage() {
   const [submitting, setSubmitting] = useState(false);
   const [tabSwitches, setTabSwitches] = useState(0);
   const [aiAlerts, setAiAlerts] = useState<{ type: string; message: string }[]>([]);
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(() =>
+    typeof document !== "undefined" && !!document.fullscreenElement
+  );
+  const [fullscreenExits, setFullscreenExits] = useState(0);
 
   useEffect(() => {
     if (!examId) return;
@@ -100,6 +105,59 @@ export default function TakeExamPage() {
     };
   }, [session]);
 
+  // ── Fullscreen enforcement ─────────────────────────────────────
+  // Leaving fullscreen mid-exam is recorded as a proctoring event and the
+  // student is immediately forced back into fullscreen.
+  const enterFullscreen = useCallback(async () => {
+    try {
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen();
+      }
+      setIsFullscreen(true);
+    } catch (err) {
+      console.error("Fullscreen request failed:", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!session || session.status !== "in_progress") return;
+    const captureFrame = (): string | undefined => {
+      const video = videoRef.current;
+      if (!video || video.videoWidth === 0) return undefined;
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return undefined;
+      ctx.drawImage(video, 0, 0);
+      return canvas.toDataURL("image/jpeg", 0.6);
+    };
+    const handleFullscreenChange = () => {
+      const fs = !!document.fullscreenElement;
+      setIsFullscreen(fs);
+      if (!fs) {
+        if (!fullscreenExitedRef.current) {
+          fullscreenExitedRef.current = true;
+          setFullscreenExits((prev) => {
+            const n = prev + 1;
+            api.logProctoringEvent(session.id, "fullscreen_exit", Math.min(n * 0.2, 1.0), captureFrame()).catch(() => {});
+            return n;
+          });
+        }
+        // Force re-entry (may be blocked until a user gesture; the gate
+        // overlay will cover the exam until fullscreen is restored).
+        document.documentElement.requestFullscreen?.().catch(() => {});
+      } else {
+        // Fullscreen restored — allow the next exit to be recorded.
+        fullscreenExitedRef.current = false;
+      }
+    };
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+    };
+  }, [session]);
+
   useEffect(() => {
     if (!session || session.status !== "in_progress" || !exam) return;
     const endTime = new Date(exam.start_time).getTime() + exam.duration_min * 60000;
@@ -161,6 +219,33 @@ export default function TakeExamPage() {
   if (session?.status === "in_progress") {
     return (
       <ProtectedRoute role="student">
+        {!isFullscreen && (
+          <div className="fixed inset-0 z-[100] bg-background/95 backdrop-blur-md flex items-center justify-center p-6">
+            <div className="max-w-sm w-full text-center space-y-4 rounded-2xl border border-border bg-card p-8 shadow-2xl">
+              <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 border border-primary/20 text-primary">
+                <span className="material-symbols-outlined text-3xl">fullscreen</span>
+              </div>
+              <h2 className="text-lg font-bold text-foreground">
+                {fullscreenExits > 0 ? "Fullscreen Required - Violation Recorded" : "Fullscreen Required"}
+              </h2>
+              <p className="text-sm text-muted-foreground">
+                You must stay in fullscreen for the entire exam{fullscreenExits > 0 && (
+                  <span className="text-destructive font-semibold"> ({fullscreenExits} exit{fullscreenExits === 1 ? "" : "s"} recorded).</span>
+                )} Leaving fullscreen is flagged as a proctoring violation.
+              </p>
+              <button
+                onClick={enterFullscreen}
+                className="w-full rounded-xl bg-primary py-2.5 text-sm font-semibold text-primary-foreground hover:bg-primary/90 transition flex items-center justify-center gap-2"
+              >
+                <span className="material-symbols-outlined text-base">fullscreen</span>
+                Enter Fullscreen to Continue
+              </button>
+              <p className="text-[11px] text-muted-foreground pt-1">
+                Re-entering fullscreen resumes the exam. Each exit is recorded.
+              </p>
+            </div>
+          </div>
+        )}
         <div className="min-h-screen flex flex-col lg:flex-row bg-background">
           {/* Main Questions Area */}
           <div className="flex-1 p-4 sm:p-6 lg:p-8 overflow-y-auto">
@@ -308,6 +393,13 @@ export default function TakeExamPage() {
                 <span className="text-muted-foreground font-medium">Tab Switches</span>
                 <span className={tabSwitches > 1 ? "text-destructive font-bold" : "text-foreground font-semibold"}>
                   {tabSwitches > 0 ? `${tabSwitches} (Warning logged)` : "0"}
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between text-xs p-2.5 rounded-xl bg-muted/40 border border-border/50">
+                <span className="text-muted-foreground font-medium">Fullscreen Exits</span>
+                <span className={fullscreenExits > 0 ? "text-destructive font-bold" : "text-foreground font-semibold"}>
+                  {fullscreenExits > 0 ? `${fullscreenExits} (Violation recorded)` : "None"}
                 </span>
               </div>
 

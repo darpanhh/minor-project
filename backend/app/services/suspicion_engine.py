@@ -9,6 +9,7 @@ EVENT_WEIGHTS = {
     EventType.phone_detected: 25,
     EventType.object_detected: 20,
     EventType.tab_switch: 10,
+    EventType.fullscreen_exit: 10,
     EventType.gaze_away: 0,
     EventType.head_pose_abnormal: 0,
     EventType.person_absent: 15,

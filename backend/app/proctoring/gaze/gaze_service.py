@@ -11,9 +11,6 @@ logger = logging.getLogger(__name__)
 
 _SMOOTHING_BUFFER_SIZE = 3
 
-# Minimum away-zone votes (out of _SMOOTHING_BUFFER_SIZE) to confirm GAZE_AWAY.
-_AWAY_CONSENSUS = 2
-
 # Startup grace: ignore all gaze/head violations for the first N seconds of a
 # session so students settling in (adjusting posture, camera warmup, etc.)
 # are not flagged immediately.
@@ -25,9 +22,6 @@ _AWAY_ZONES = {
     "bottom_left", "bottom_center", "bottom_right",
 }
 
-# First snapshot ~1s after the violation activates (activation already
-# requires 2/3 buffer consensus, so this is not single-frame noise), then
-# escalate to suspicious/high while it persists. Each level = one event+snapshot.
 _GAZE_EVENT_THRESHOLDS_SEC = {
     "warning": 1.0,
     "suspicious": 3.0,
@@ -37,6 +31,13 @@ _GAZE_EVENT_THRESHOLDS_SEC = {
 _HEAD_TURN_YAW_THRESHOLD = 38.0
 _LOOKING_DOWN_PITCH_THRESHOLD = -35.0
 _LOOKING_OFF_SCREEN_TIMEOUT = 3.0
+
+# When a calibrated head profile is available, a HEAD_TURN is flagged when the
+# yaw deviates from the calibrated "forward" yaw by more than the maximum
+# calibrated left/right turn plus this margin (degrees).
+_HEAD_TURN_CALIB_MARGIN = 10.0
+
+_EVENT_COOLDOWN_SEC = 10.0
 
 
 class GazeService:
@@ -63,13 +64,11 @@ class GazeService:
         self.estimator = GazeEstimator()
 
         self.calibration_profile: dict | None = None
+        self._head_profile: dict | None = None
 
         self._buffer: deque = deque(maxlen=_SMOOTHING_BUFFER_SIZE)
         self._smoothed_point: str | None = None
         self._smoothed_confidence: float = 0.0
-        self._smoothed_yaw: float | None = None
-        self._smoothed_pitch: float | None = None
-        self._smoothed_roll: float | None = None
         self._last_raw_point: str | None = None
         self._last_raw_confidence: float = 0.0
 
@@ -80,11 +79,12 @@ class GazeService:
         self._frame_count: int = 0
         self._started_at: float | None = None
         self._violations: dict[str, dict] = {
-            "GAZE_AWAY": {"active": False, "start": None, "events": [], "logged_duration": 0.0},
-            "HEAD_TURN": {"active": False, "start": None, "events": [], "logged_duration": 0.0},
-            "LOOKING_DOWN": {"active": False, "start": None, "events": [], "logged_duration": 0.0},
-            "LOOKING_OFF_SCREEN": {"active": False, "start": None, "events": [], "logged_duration": 0.0},
+            "GAZE_AWAY": {"active": False, "start": None, "events": []},
+            "HEAD_TURN": {"active": False, "start": None, "events": []},
+            "LOOKING_DOWN": {"active": False, "start": None, "events": []},
+            "LOOKING_OFF_SCREEN": {"active": False, "start": None, "events": []},
         }
+        self._last_event_time: dict[str, float] = {}
         self._no_face_since: float | None = None
 
     # ------------------------------------------------------------------
@@ -93,6 +93,7 @@ class GazeService:
 
     def load_calibration(self, profile: dict) -> None:
         self.calibration_profile = profile
+        self._head_profile = profile.get("head") if profile else None
         logger.info("GazeService: loaded calibration (%d points)", len(profile))
 
     def process_frame(self, frame) -> dict:
@@ -140,34 +141,39 @@ class GazeService:
         now = time.time()
         pending = []
 
-        thresholds = sorted(_GAZE_EVENT_THRESHOLDS_SEC.values())
-
         for vtype, state in self._violations.items():
             if not state["active"] or state["start"] is None:
                 continue
 
             duration = now - state["start"]
-
-            # Emit one event each time the violation crosses a higher threshold
-            # (warning -> suspicious -> high). No time-based cooldown: every
-            # escalation (and every new violation instance) produces a snapshot.
-            crossed = [
-                t for t in thresholds
-                if duration >= t and t > state["logged_duration"]
-            ]
-            if not crossed:
-                continue
-            state["logged_duration"] = max(crossed)
-
+            # Map EventType based on violation type
             etype = self._violation_to_event_type(vtype)
             conf = self._compute_violation_confidence(vtype)
+
+            thresholds = _GAZE_EVENT_THRESHOLDS_SEC
+            needs_event = False
+
+            if duration >= thresholds["high"]:
+                needs_event = True
+            elif duration >= thresholds["suspicious"]:
+                needs_event = True
+            elif duration >= thresholds["warning"]:
+                needs_event = True
+
+            if not needs_event:
+                continue
+
+            last = self._last_event_time.get(vtype, 0.0)
+            if now - last < _EVENT_COOLDOWN_SEC:
+                continue
+
+            self._last_event_time[vtype] = now
 
             pending.append({
                 "event_type": etype,
                 "confidence": conf,
                 "violation_type": vtype,
                 "duration": round(duration, 2),
-                "start_time": state["start"],
             })
 
             logger.info(
@@ -212,9 +218,6 @@ class GazeService:
         self._buffer.clear()
         self._smoothed_point = None
         self._smoothed_confidence = 0.0
-        self._smoothed_yaw = None
-        self._smoothed_pitch = None
-        self._smoothed_roll = None
         self._last_raw_point = None
         self._last_raw_confidence = 0.0
 
@@ -234,13 +237,7 @@ class GazeService:
         self._last_raw_point = raw_point
         self._last_raw_confidence = raw_conf
 
-        self._buffer.append({
-            "point": raw_point,
-            "confidence": raw_conf,
-            "yaw": features.get("yaw"),
-            "pitch": features.get("pitch"),
-            "roll": features.get("roll"),
-        })
+        self._buffer.append({"point": raw_point, "confidence": raw_conf})
 
         if len(self._buffer) >= _SMOOTHING_BUFFER_SIZE:
             vote_counts: dict[str, float] = {}
@@ -260,16 +257,6 @@ class GazeService:
             self._smoothed_point = raw_point
             self._smoothed_confidence = raw_conf
 
-        # ── Smoothed head angles (mean over the temporal buffer) ────
-        # Used for HEAD_TURN / LOOKING_DOWN so a single-frame spike in the
-        # noisy solvePnP output cannot trigger a violation.
-        for key in ("yaw", "pitch", "roll"):
-            vals = [e[key] for e in self._buffer if e.get(key) is not None]
-            if vals:
-                setattr(self, f"_smoothed_{key}", sum(vals) / len(vals))
-            else:
-                setattr(self, f"_smoothed_{key}", None)
-
         logger.debug(
             "Gaze: raw=%s(%.3f) smoothed=%s(%.3f) buffer=%d",
             raw_point, raw_conf,
@@ -288,15 +275,14 @@ class GazeService:
             return
 
         active_violations: set[str] = set()
-        yaw = self._smoothed_yaw if self._smoothed_yaw is not None else self._current_features.get("yaw")
-        pitch = self._smoothed_pitch if self._smoothed_pitch is not None else self._current_features.get("pitch")
+        yaw = self._current_features.get("yaw")
+        pitch = self._current_features.get("pitch")
 
         # ── GAZE_AWAY ──────────────────────────────────────────────
-        # Require buffer consensus (at least _AWAY_CONSENSUS away-zone votes
-        # out of _SMOOTHING_BUFFER_SIZE frames)
+        # Require buffer consensus (at least 2 away-zone votes out of 3 frames)
         if len(self._buffer) >= _SMOOTHING_BUFFER_SIZE:
             away_votes = sum(1 for item in self._buffer if item.get("point") in _AWAY_ZONES)
-            if away_votes >= _AWAY_CONSENSUS:
+            if away_votes >= 2:
                 active_violations.add("GAZE_AWAY")
 
         # Forced clear: if smoothed prediction or current raw prediction is "center"
@@ -304,11 +290,11 @@ class GazeService:
             active_violations.discard("GAZE_AWAY")
 
         # ── HEAD_TURN ──────────────────────────────────────────────
-        if yaw is not None and abs(yaw) > _HEAD_TURN_YAW_THRESHOLD:
+        if yaw is not None and self._is_head_turn(yaw):
             active_violations.add("HEAD_TURN")
 
         # ── LOOKING_DOWN ───────────────────────────────────────────
-        if pitch is not None and pitch < _LOOKING_DOWN_PITCH_THRESHOLD:
+        if pitch is not None and self._is_looking_down(pitch):
             active_violations.add("LOOKING_DOWN")
 
         self._update_violation_state("GAZE_AWAY", "GAZE_AWAY" in active_violations, now)
@@ -317,13 +303,33 @@ class GazeService:
 
         self._clear_non_matching_violations(active_violations)
 
+    def _is_head_turn(self, yaw: float) -> bool:
+        head = self._head_profile or {}
+        forward = (head.get("forward") or {}).get("yaw")
+        left = (head.get("left") or {}).get("yaw")
+        right = (head.get("right") or {}).get("yaw")
+
+        if forward is not None and left is not None and right is not None:
+            max_turn = max(abs(left - forward), abs(right - forward))
+            return abs(yaw - forward) > max_turn + _HEAD_TURN_CALIB_MARGIN
+
+        return abs(yaw) > _HEAD_TURN_YAW_THRESHOLD
+
+    def _is_looking_down(self, pitch: float) -> bool:
+        head = self._head_profile or {}
+        forward_pitch = (head.get("forward") or {}).get("pitch")
+
+        if forward_pitch is not None:
+            return pitch < forward_pitch + _LOOKING_DOWN_PITCH_THRESHOLD
+
+        return pitch < _LOOKING_DOWN_PITCH_THRESHOLD
+
     def _update_violation_state(self, vtype: str, is_active: bool, now: float) -> None:
         vs = self._violations[vtype]
         if is_active and not vs["active"]:
             vs["active"] = True
             vs["start"] = now
             vs["events"] = []
-            vs["logged_duration"] = 0.0
             logger.info("Gaze: %s started", vtype)
         elif not is_active and vs["active"]:
             vs["active"] = False
