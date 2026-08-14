@@ -69,32 +69,7 @@ export function Sidebar() {
         })}
       </nav>
 
-      {user && (
-        <div className="p-4 border-t border-border/80 bg-muted/30">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3 min-w-0">
-              <div className="w-9 h-9 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center text-xs font-bold text-primary shrink-0 shadow-sm">
-                {user.full_name?.charAt(0).toUpperCase() || "U"}
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-semibold truncate text-foreground leading-tight">
-                  {user.full_name}
-                </p>
-                <p className="text-xs text-muted-foreground capitalize truncate">
-                  {user.role}
-                </p>
-              </div>
-            </div>
-            <button
-              onClick={logout}
-              title="Sign Out"
-              className="p-1.5 text-muted-foreground hover:text-destructive hover:bg-destructive/10 rounded-lg transition-colors"
-            >
-              <span className="material-symbols-outlined text-lg">logout</span>
-            </button>
-          </div>
-        </div>
-      )}
+    
     </aside>
   );
 }

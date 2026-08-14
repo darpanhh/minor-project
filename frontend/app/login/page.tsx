@@ -1,17 +1,25 @@
 "use client";
 
-import { useState, FormEvent } from "react";
+import { useState, FormEvent, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/src/contexts/AuthContext";
 import Link from "next/link";
 
 export default function LoginPage() {
-  const { login } = useAuth();
+  const { login, user, loading: authLoading } = useAuth();
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (authLoading) return;
+    if (!user) return;
+    if (user.role === "admin") router.replace("/admin/dashboard");
+    else if (user.role === "teacher") router.replace("/teacher/dashboard");
+    else router.replace("/student/dashboard");
+  }, [user, authLoading, router]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
