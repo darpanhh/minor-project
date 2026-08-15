@@ -7,7 +7,7 @@ const roleNavItems: Record<string, { href: string; label: string; icon: string }
   admin: [
     { href: "/admin/dashboard", label: "Dashboard", icon: "dashboard" },
     { href: "/admin/exams", label: "Exams", icon: "quiz" },
-    { href: "/admin/reports", label: "Reports", icon: "assessment" },
+    { href: "/admin/sessions", label: "Sessions", icon: "assessment" },
   ],
   teacher: [
     { href: "/teacher/dashboard", label: "Dashboard", icon: "dashboard" },

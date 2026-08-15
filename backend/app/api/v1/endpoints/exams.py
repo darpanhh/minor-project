@@ -6,7 +6,7 @@ from app.core.database import get_db
 from app.auth.dependencies import get_current_user, require_role
 from app.models.user import User, UserRole
 from app.models.exam import Exam, ExamSession, SessionStatus
-from app.models.event import ProctoringEvent, Alert, EventType
+from app.models.event import ProctoringEvent, EventType
 from app.models.report import CheatingLog
 from app.schemas.exam_schema import ExamCreate, ExamOut, ExamSessionOut, ExamSessionDetailOut
 from pydantic import BaseModel
@@ -116,7 +116,6 @@ def delete_exam(
     sessions = db.query(ExamSession).filter(ExamSession.exam_id == exam_id).all()
     for s in sessions:
         db.query(ProctoringEvent).filter(ProctoringEvent.session_id == s.id).delete()
-        db.query(Alert).filter(Alert.session_id == s.id).delete()
         db.query(CheatingLog).filter(CheatingLog.session_id == s.id).delete()
         db.delete(s)
 

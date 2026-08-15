@@ -4,17 +4,20 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { api } from "@/src/services/api";
 import ProtectedRoute from "@/src/components/ProtectedRoute";
+import { useAuth } from "@/src/contexts/AuthContext";
 
 export default function AdminExamsPage() {
+  const { user } = useAuth();
   const [exams, setExams] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (!user) return;
     api.listExams()
       .then(setExams)
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, []);
+  }, [user]);
 
   async function handleDelete(id: string) {
     if (!confirm("Delete this exam? This cannot be undone.")) return;

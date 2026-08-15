@@ -26,7 +26,7 @@ export function Sidebar() {
   const adminItems = [
     { href: "/admin/dashboard", label: "Dashboard", icon: "admin_panel_settings" },
     { href: "/admin/exams", label: "Exams Portal", icon: "local_library" },
-    { href: "/admin/reports", label: "Audit Reports", icon: "assessment" },
+    { href: "/admin/sessions", label: "Exam Sessions", icon: "assessment" },
   ];
 
   const navItems =

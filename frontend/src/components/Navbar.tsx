@@ -11,7 +11,7 @@ export default function Navbar() {
   const adminLinks = [
     { href: "/admin/dashboard", label: "Dashboard" },
     { href: "/admin/exams", label: "Exams" },
-    { href: "/admin/reports", label: "Reports" },
+    { href: "/admin/sessions", label: "Sessions" },
   ];
 
   const studentLinks = [

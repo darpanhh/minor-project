@@ -1,19 +1,22 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { useParams, useRouter } from "next/navigation";
 import { api } from "@/src/services/api";
 import ProtectedRoute from "@/src/components/ProtectedRoute";
+import { useAuth } from "@/src/contexts/AuthContext";
 import ProctoringMonitor from "@/src/components/ProctoringMonitor";
 
 export default function TakeExamPage() {
   const { id: examId } = useParams<{ id: string }>();
   const router = useRouter();
+  const { user } = useAuth();
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
-  const firstSwitchRef = useRef(false);
   const fullscreenExitedRef = useRef(false);
+  const fsExitCountRef = useRef(0);
   const handleSubmitRef = useRef<(() => void) | null>(null);
 
   const [exam, setExam] = useState<any>(null);
@@ -22,6 +25,7 @@ export default function TakeExamPage() {
   const [error, setError] = useState("");
   const [cameraActive, setCameraActive] = useState(false);
   const [answers, setAnswers] = useState<Record<string, number>>({});
+  const [currentQuestion, setCurrentQuestion] = useState(0);
   const [timeLeft, setTimeLeft] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [tabSwitches, setTabSwitches] = useState(0);
@@ -30,9 +34,19 @@ export default function TakeExamPage() {
     typeof document !== "undefined" && !!document.fullscreenElement
   );
   const [fullscreenExits, setFullscreenExits] = useState(0);
+  const [tabWarningVisible, setTabWarningVisible] = useState(false);
+  const pendingTabWarningRef = useRef(false);
+  const tabHiddenAtRef = useRef(0);
+  const tabSwitchCountRef = useRef(0);
+  const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
+  const [allowWindowMode, setAllowWindowMode] = useState(false);
+  const mounted = typeof document !== "undefined";
+  const tabWarningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [fsExitWarningVisible, setFsExitWarningVisible] = useState(false);
+  const fsExitWarningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (!examId) return;
+    if (!examId || !user) return;
     Promise.all([api.getExam(examId), api.mySessionForExam(examId)])
       .then(([e, s]) => {
         if (!s) { setError("You are not registered for this exam."); return; }
@@ -43,7 +57,7 @@ export default function TakeExamPage() {
       })
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, [examId, router]);
+  }, [examId, router, user]);
 
   useEffect(() => {
     if (session?.status !== "registered" && session?.status !== "in_progress") return;
@@ -67,36 +81,42 @@ export default function TakeExamPage() {
   }, [session]);
 
   useEffect(() => {
-    if (session?.status === "in_progress") {
-      firstSwitchRef.current = false;
-    }
-  }, [session?.status]);
-
-  useEffect(() => {
     if (!session || session.status === "submitted") return;
-    const captureFrame = (): string | undefined => {
-      const video = videoRef.current;
-      if (!video || video.videoWidth === 0) return undefined;
-      const canvas = document.createElement("canvas");
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return undefined;
-      ctx.drawImage(video, 0, 0);
-      return canvas.toDataURL("image/jpeg", 0.6);
-    };
     const handleVisibility = () => {
       if (document.hidden) {
-        if (!firstSwitchRef.current) {
-          firstSwitchRef.current = true;
-          setTabSwitches(1);
-          return;
+        // Record the exact moment the student left, and bump the occurrence
+        // counter (ref so the return handler can read the fresh value).
+        tabHiddenAtRef.current = Date.now();
+        tabSwitchCountRef.current += 1;
+        setTabSwitches(tabSwitchCountRef.current);
+        // Defer showing the warning until the student returns to the exam
+        // page — the popup must not expire while they are still away.
+        pendingTabWarningRef.current = true;
+      } else if (pendingTabWarningRef.current) {
+        pendingTabWarningRef.current = false;
+        setTabWarningVisible(true);
+        if (tabWarningTimerRef.current) clearTimeout(tabWarningTimerRef.current);
+        tabWarningTimerRef.current = setTimeout(() => setTabWarningVisible(false), 4000);
+        // Only the 2nd+ occurrence is recorded — the first is just a warning.
+        // The event carries the exact hidden-at timestamp, the seconds the
+        // student stayed away, the occurrence number, and the action taken.
+        // No snapshot is captured for tab-switch events.
+        const n = tabSwitchCountRef.current;
+        if (n >= 2) {
+          const durationSec = Math.max(0, (Date.now() - tabHiddenAtRef.current) / 1000);
+          api.logProctoringEvent(
+            session.id,
+            "tab_switch",
+            Math.min(n * 0.2, 1.0),
+            undefined,
+            {
+              timestamp: new Date(tabHiddenAtRef.current).toISOString(),
+              occurrence: n,
+              duration: Math.round(durationSec * 10) / 10,
+              action: "incident recorded (repeated tab switch)",
+            }
+          ).catch(() => {});
         }
-        setTabSwitches((prev) => {
-          const n = prev + 1;
-          api.logProctoringEvent(session.id, "tab_switch", Math.min(n * 0.2, 1.0), captureFrame()).catch(() => {});
-          return n;
-        });
       }
     };
     document.addEventListener("visibilitychange", handleVisibility);
@@ -113,50 +133,69 @@ export default function TakeExamPage() {
       if (!document.fullscreenElement) {
         await document.documentElement.requestFullscreen();
       }
-      setIsFullscreen(true);
     } catch (err) {
       console.error("Fullscreen request failed:", err);
     }
+    // isFullscreen is kept in sync by the fullscreenchange listener.
   }, []);
+
+  // Best-effort auto-fullscreen: only attempted when the browser grants a
+  // user activation (e.g. immediately after the "Start Exam" click that
+  // navigated here). Outside a gesture Chrome always rejects the request,
+  // so we skip it silently — the gate / read-only banner buttons handle it.
+  useEffect(() => {
+    if (session?.status === "in_progress" && navigator.userActivation?.isActive) {
+      enterFullscreen();
+    }
+  }, [session?.status, enterFullscreen]);
 
   useEffect(() => {
     if (!session || session.status !== "in_progress") return;
-    const captureFrame = (): string | undefined => {
-      const video = videoRef.current;
-      if (!video || video.videoWidth === 0) return undefined;
-      const canvas = document.createElement("canvas");
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return undefined;
-      ctx.drawImage(video, 0, 0);
-      return canvas.toDataURL("image/jpeg", 0.6);
-    };
     const handleFullscreenChange = () => {
       const fs = !!document.fullscreenElement;
       setIsFullscreen(fs);
       if (!fs) {
+        // Every exit (ESC, F11, browser controls) records the exit and asks
+        // the student to confirm: stay in the exam or leave. ESC is not
+        // reliably delivered to the page as a keydown in some browsers, so
+        // the confirmation dialog is opened from fullscreenchange itself.
         if (!fullscreenExitedRef.current) {
           fullscreenExitedRef.current = true;
-          setFullscreenExits((prev) => {
-            const n = prev + 1;
-            api.logProctoringEvent(session.id, "fullscreen_exit", Math.min(n * 0.2, 1.0), captureFrame()).catch(() => {});
-            return n;
-          });
+          fsExitCountRef.current += 1;
+          setFullscreenExits(fsExitCountRef.current);
         }
-        // Force re-entry (may be blocked until a user gesture; the gate
-        // overlay will cover the exam until fullscreen is restored).
-        document.documentElement.requestFullscreen?.().catch(() => {});
+        // Tiered warning popup, same treatment as the tab-switch warning.
+        setFsExitWarningVisible(true);
+        if (fsExitWarningTimerRef.current) clearTimeout(fsExitWarningTimerRef.current);
+        fsExitWarningTimerRef.current = setTimeout(() => setFsExitWarningVisible(false), 4000);
+        setShowLeaveConfirm(true);
       } else {
-        // Fullscreen restored — allow the next exit to be recorded.
+        // Fullscreen restored — allow the next exit to be recorded and
+        // dismiss the exit warning immediately.
         fullscreenExitedRef.current = false;
+        setAllowWindowMode(false);
+        if (fsExitWarningTimerRef.current) clearTimeout(fsExitWarningTimerRef.current);
+        setFsExitWarningVisible(false);
       }
     };
     document.addEventListener("fullscreenchange", handleFullscreenChange);
     return () => {
       document.removeEventListener("fullscreenchange", handleFullscreenChange);
+      if (fsExitWarningTimerRef.current) clearTimeout(fsExitWarningTimerRef.current);
     };
   }, [session]);
+
+  const stayInExam = () => {
+    setShowLeaveConfirm(false);
+    enterFullscreen();
+  };
+
+  // Leaving fullscreen never ends the exam — the student can keep going
+  // in a normal window. The gate overlay is suppressed while in window mode.
+  const continueInWindowMode = () => {
+    setShowLeaveConfirm(false);
+    setAllowWindowMode(true);
+  };
 
   useEffect(() => {
     if (!session || session.status !== "in_progress" || !exam) return;
@@ -178,7 +217,6 @@ export default function TakeExamPage() {
       const updated = await api.submitSession(session.id, answers);
       setSession(updated);
       streamRef.current?.getTracks().forEach((t) => t.stop());
-      router.push(`/student/results?session=${updated.id}`);
     } catch (err: any) { setError(err.message); setSubmitting(false); }
   }
 
@@ -191,6 +229,12 @@ export default function TakeExamPage() {
     const s = seconds % 60;
     return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
   }
+
+  useEffect(() => {
+    return () => {
+      if (tabWarningTimerRef.current) clearTimeout(tabWarningTimerRef.current);
+    };
+  }, []);
 
   if (loading) return (
     <ProtectedRoute role="student">
@@ -216,40 +260,211 @@ export default function TakeExamPage() {
     </ProtectedRoute>
   );
 
-  if (session?.status === "in_progress") {
+  if (session?.status === "submitted") {
     return (
       <ProtectedRoute role="student">
-        {!isFullscreen && (
+        <div className="min-h-[70vh] flex items-center justify-center p-6">
+          <div className="max-w-md w-full text-center space-y-4 rounded-2xl border border-border bg-card p-10 shadow-2xl animate-fade-in">
+            <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-emerald-500/10 border-2 border-emerald-500/40">
+              <span className="material-symbols-outlined text-4xl text-emerald-500">check_circle</span>
+            </div>
+            <h2 className="text-xl font-bold text-foreground">
+              You have successfully finished the exam!
+            </h2>
+            <p className="text-sm text-muted-foreground leading-relaxed">
+              Your answers have been submitted. Your result will be published
+              later by the administrator.
+            </p>
+            <button
+              onClick={() => router.push(`/student/results?session=${session.id}`)}
+              className="w-full rounded-xl bg-primary py-2.5 text-sm font-semibold text-primary-foreground hover:bg-primary/90 transition"
+            >
+              View My Results
+            </button>
+          </div>
+        </div>
+      </ProtectedRoute>
+    );
+  }
+
+  if (session?.status === "in_progress") {
+    // Tiered full-screen exit messaging: 1st, 2nd, 3rd+ exit
+    const fsMessages = [
+      {
+        title: "Full-Screen Mode Exited",
+        desc: "Please return to full-screen mode to continue your exam. Attempt recorded.",
+      },
+      {
+        title: "Warning: Full-Screen Mode Exited Again",
+        desc: "Please return to full-screen mode immediately. Repeated exits may be flagged for review.",
+      },
+      {
+        title: "Repeated Full-Screen Exits",
+        desc: "You have exited full-screen mode multiple times. This activity has been flagged for review.",
+      },
+    ];
+    const fsMsg = fsMessages[Math.min(Math.max(fullscreenExits - 1, 0), 2)];
+    // Answers can only be selected in fullscreen — outside of it the exam is
+    // read-only (the student can view questions but cannot click options).
+    const canAnswer = isFullscreen;
+
+    return (
+      <ProtectedRoute role="student">
+        {!isFullscreen && !showLeaveConfirm && !allowWindowMode && (
           <div className="fixed inset-0 z-[100] bg-background/95 backdrop-blur-md flex items-center justify-center p-6">
             <div className="max-w-sm w-full text-center space-y-4 rounded-2xl border border-border bg-card p-8 shadow-2xl">
-              <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 border border-primary/20 text-primary">
-                <span className="material-symbols-outlined text-3xl">fullscreen</span>
+              <div className={`mx-auto flex h-16 w-16 items-center justify-center rounded-2xl border ${
+                fullscreenExits >= 3
+                  ? "bg-destructive/10 border-destructive/30 text-destructive"
+                  : "bg-amber-500/10 border-amber-500/30 text-amber-600"
+              }`}>
+                <span className="material-symbols-outlined text-3xl">
+                  {fullscreenExits >= 3 ? "gavel" : "fullscreen"}
+                </span>
               </div>
-              <h2 className="text-lg font-bold text-foreground">
-                {fullscreenExits > 0 ? "Fullscreen Required - Violation Recorded" : "Fullscreen Required"}
-              </h2>
+              <h2 className="text-lg font-bold text-foreground">{fsMsg.title}</h2>
               <p className="text-sm text-muted-foreground">
-                You must stay in fullscreen for the entire exam{fullscreenExits > 0 && (
-                  <span className="text-destructive font-semibold"> ({fullscreenExits} exit{fullscreenExits === 1 ? "" : "s"} recorded).</span>
-                )} Leaving fullscreen is flagged as a proctoring violation.
+                {fsMsg.desc}{" "}
+                {fullscreenExits > 0 && (
+                  <span className="text-destructive font-semibold">
+                    ({fullscreenExits} exit{fullscreenExits === 1 ? "" : "s"} recorded).
+                  </span>
+                )}
               </p>
               <button
                 onClick={enterFullscreen}
-                className="w-full rounded-xl bg-primary py-2.5 text-sm font-semibold text-primary-foreground hover:bg-primary/90 transition flex items-center justify-center gap-2"
+                className="w-full rounded-xl bg-primary py-2.5 text-sm font-semibold text-primary-foreground hover:bg-primary/90 transition"
               >
-                <span className="material-symbols-outlined text-base">fullscreen</span>
                 Enter Fullscreen to Continue
               </button>
               <p className="text-[11px] text-muted-foreground pt-1">
-                Re-entering fullscreen resumes the exam. Each exit is recorded.
+                Re-entering fullscreen resumes the exam. Stay in fullscreen to answer.
               </p>
+            </div>
+          </div>
+        )}
+        {mounted &&
+          tabWarningVisible &&
+          tabSwitches > 0 &&
+          createPortal(
+            <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[110] w-[min(92vw,640px)] pointer-events-none">
+              <div
+                role="alert"
+                className={`w-full px-5 py-4 rounded-2xl shadow-2xl border-2 font-bold text-sm sm:text-base text-center flex items-center justify-center gap-2.5 ${
+                  tabSwitches >= 2
+                    ? "bg-red-600 border-red-400 text-white"
+                    : "bg-amber-400 border-amber-300 text-amber-950"
+                }`}
+              >
+                <span className="text-xl shrink-0">
+                  {tabSwitches >= 2 ? "🚨" : "⚠️"}
+                </span>
+                <span>
+                  {tabSwitches === 1 ? (
+                    <>
+                      Leaving Exam Tab — You have switched away from the examination
+                      window. Please return to the exam immediately. This is a warning;
+                      repeated switching will be recorded.
+                    </>
+                  ) : (
+                    <>
+                      Repeated Tab Switching Detected — You have left the examination
+                      window multiple times. This activity has been recorded.
+                    </>
+                  )}
+                </span>
+              </div>
+            </div>,
+            document.body
+          )}
+        {mounted &&
+          fsExitWarningVisible &&
+          createPortal(
+            <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[140] w-[min(92vw,640px)] pointer-events-none">
+              <div
+                role="alert"
+                className={`w-full px-5 py-4 rounded-2xl shadow-2xl border-2 font-bold text-sm sm:text-base text-center flex items-center justify-center gap-2.5 ${
+                  fullscreenExits >= 2
+                    ? "bg-red-600 border-red-400 text-white"
+                    : "bg-amber-400 border-amber-300 text-amber-950"
+                }`}
+              >
+                <span className="text-xl shrink-0">
+                  {fullscreenExits >= 2 ? "🚨" : "⚠️"}
+                </span>
+                <span>
+                  {fullscreenExits === 1 ? (
+                    <>
+                      Full-Screen Mode Exited — You have left fullscreen mode.
+                      Re-enter fullscreen to select answers.
+                    </>
+                  ) : (
+                    <>
+                      Repeated Full-Screen Exits — You have left fullscreen mode
+                      multiple times. You must stay in fullscreen to answer questions.
+                    </>
+                  )}
+                </span>
+              </div>
+            </div>,
+            document.body
+          )}
+        {showLeaveConfirm && (
+          <div className="fixed inset-0 z-[130] bg-black/70 backdrop-blur-sm flex items-center justify-center p-6">
+            <div className="max-w-sm w-full text-center space-y-4 rounded-2xl border border-border bg-card p-8 shadow-2xl">
+              <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-600">
+                <span className="material-symbols-outlined text-3xl">fullscreen_exit</span>
+              </div>
+              <h2 className="text-lg font-bold text-foreground">
+                You have exited fullscreen
+              </h2>
+              <div
+                className={`rounded-xl border px-4 py-3 text-sm font-bold text-center ${
+                  fullscreenExits >= 2
+                    ? "bg-red-600/10 border-red-500/30 text-red-600"
+                    : "bg-amber-500/10 border-amber-500/30 text-amber-600"
+                }`}
+              >
+                {fullscreenExits === 1 ? (
+                  <>
+                    Warning: Full-Screen Mode Exited — re-enter fullscreen to
+                    select answers.
+                  </>
+                ) : (
+                  <>
+                    Error: Repeated Full-Screen Exits — you must stay in
+                    fullscreen to answer questions.
+                  </>
+                )}
+              </div>
+              <p className="text-sm text-muted-foreground leading-relaxed">
+                Your exam is still in progress and your answers are safe. You can
+                return to fullscreen or continue without it — leaving fullscreen
+                is recorded, but does not end your exam.
+              </p>
+              <div className="space-y-2.5 pt-1">
+                <button
+                  onClick={stayInExam}
+                  className="w-full rounded-xl bg-primary py-2.5 text-sm font-semibold text-primary-foreground hover:bg-primary/90 transition flex items-center justify-center gap-2"
+                >
+                  <span className="material-symbols-outlined text-base">fullscreen</span>
+                  Return to Fullscreen
+                </button>
+                <button
+                  onClick={continueInWindowMode}
+                  className="w-full rounded-xl bg-muted/60 border border-border py-2.5 text-sm font-semibold text-foreground hover:bg-muted transition flex items-center justify-center gap-2"
+                >
+                  <span className="material-symbols-outlined text-base">fullscreen_exit</span>
+                  Exit Fullscreen
+                </button>
+              </div>
             </div>
           </div>
         )}
         <div className="min-h-screen flex flex-col lg:flex-row bg-background">
           {/* Main Questions Area */}
-          <div className="flex-1 p-4 sm:p-6 lg:p-8 overflow-y-auto">
-            <div className="max-w-3xl mx-auto space-y-6">
+          <div className="flex-1 p-4 sm:p-6 lg:p-8 pb-8 overflow-y-auto bg-gradient-to-b from-primary/[0.05] via-background to-background">
+            <div className="max-w-3xl mx-auto space-y-5">
               {/* Exam Header */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between bg-card border border-border/80 rounded-2xl p-5 shadow-sm gap-4">
                 <div>
@@ -277,91 +492,207 @@ export default function TakeExamPage() {
 
               {error && (
                 <div className="bg-destructive/10 border border-destructive/20 rounded-2xl p-4 text-sm text-destructive flex items-center gap-2">
-                  <span className="material-symbols-outlined text-lg">warning</span>
+                  <span className="material-symbols-outlined text-lg shrink-0">warning</span>
                   <span>{error}</span>
                 </div>
               )}
 
-              {/* Questions List */}
-              <div className="space-y-6">
-                {exam.questions?.map((q: any, i: number) => {
-                  const isAnswered = answers[String(i)] !== undefined;
-                  return (
-                    <div
-                      key={i}
-                      className={`bg-card border rounded-2xl p-6 transition-all shadow-sm ${
-                        isAnswered ? "border-primary/50 ring-1 ring-primary/20" : "border-border/80"
-                      }`}
-                    >
-                      <div className="flex items-start gap-3 mb-4">
-                        <span className="w-7 h-7 rounded-lg bg-primary/10 text-primary font-bold text-xs flex items-center justify-center shrink-0 mt-0.5">
-                          {i + 1}
-                        </span>
-                        <p className="font-semibold text-foreground text-base leading-snug">
-                          {q.question}
-                        </p>
-                      </div>
+              {!canAnswer && (
+                <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 text-sm text-amber-600 flex items-center gap-3">
+                  <span className="material-symbols-outlined text-lg shrink-0">lock</span>
+                  <div className="space-y-0.5 flex-1">
+                    <p className="font-bold">Read-Only Mode</p>
+                    <p className="text-xs leading-relaxed">
+                      You can view the questions, but you must enter fullscreen mode to select answers.
+                    </p>
+                  </div>
+                  <button
+                    onClick={enterFullscreen}
+                    className="shrink-0 rounded-xl bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground hover:bg-primary/90 transition"
+                  >
+                    Enter Fullscreen
+                  </button>
+                </div>
+              )}
 
-                      <div className="space-y-3 pl-10">
-                        {q.options?.map((opt: string, oi: number) => {
-                          const selected = answers[String(i)] === oi;
-                          return (
-                            <label
-                              key={oi}
-                              className={`flex items-center gap-3 p-3.5 rounded-xl border cursor-pointer transition-all ${
-                                selected
-                                  ? "border-primary bg-primary/5 text-foreground font-medium shadow-sm"
-                                  : "border-border/80 hover:border-border hover:bg-muted/40 text-muted-foreground"
-                              }`}
-                            >
-                              <input
-                                type="radio"
-                                name={`q-${i}`}
-                                checked={selected}
-                                onChange={() => setAnswers({ ...answers, [String(i)]: oi })}
-                                className="w-4 h-4 accent-primary shrink-0"
-                              />
-                              <span className="text-sm">
-                                <strong className="mr-2 font-bold opacity-75">{String.fromCharCode(65 + oi)}.</strong>
-                                {opt}
-                              </span>
-                            </label>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  );
-                })}
+              {/* Previous — above the question */}
+              <div className="flex items-center justify-between">
+                <button
+                  onClick={() => setCurrentQuestion((c) => Math.max(0, c - 1))}
+                  disabled={currentQuestion === 0}
+                  className="px-6 py-2.5 bg-muted hover:bg-muted/60 text-foreground font-bold rounded-xl text-sm transition flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <span className="material-symbols-outlined text-base">chevron_left</span>
+                  Previous
+                </button>
+                <span className="text-xs text-muted-foreground font-medium">
+                  {Object.keys(answers).length} of {exam.questions?.length || 0} answered
+                </span>
               </div>
 
-              {/* Bottom Actions Footer */}
-              <div className="mt-8 flex items-center justify-between sticky bottom-4 bg-card/90 backdrop-blur-xl p-4 border border-border/80 rounded-2xl shadow-xl z-10">
-                <p className="text-xs text-muted-foreground font-medium">
-                  {Object.keys(answers).length} of {exam.questions?.length || 0} completed
-                </p>
-                <button
-                  onClick={handleSubmit}
-                  disabled={submitting}
-                  className="px-6 py-2.5 bg-gradient-to-r from-primary to-blue-600 hover:from-primary/90 hover:to-blue-500 text-white font-semibold rounded-xl text-sm transition shadow-lg shadow-primary/20 flex items-center gap-2 cursor-pointer disabled:opacity-70"
-                >
-                  {submitting ? (
-                    <>
-                      <div className="w-4 h-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />
-                      <span>Submitting Answers...</span>
-                    </>
-                  ) : (
-                    <>
-                      <span>Submit Final Answers</span>
-                      <span className="material-symbols-outlined text-lg">send</span>
-                    </>
-                  )}
-                </button>
+              {/* Current Question (one per page) — large */}
+              <div
+                className={`bg-card border rounded-3xl overflow-hidden transition-all shadow-xl ${
+                  answers[String(currentQuestion)] !== undefined
+                    ? "border-primary/50 ring-2 ring-primary/20"
+                    : "border-border/80"
+                }`}
+              >
+                  {/* Card header strip */}
+                  <div className="flex items-center justify-between gap-3 px-6 sm:px-8 py-4 bg-muted/50 border-b border-border/60">
+                    <div className="flex items-center gap-3">
+                      <span className="w-10 h-10 rounded-xl bg-primary/10 text-primary font-bold text-sm flex items-center justify-center shrink-0">
+                        {currentQuestion + 1}
+                      </span>
+                      <div>
+                        <p className="text-sm font-bold text-foreground">
+                          Question {currentQuestion + 1}
+                        </p>
+                        <p className="text-[11px] text-muted-foreground">
+                          of {exam.questions?.length || 0} ·{" "}
+                          {Object.keys(answers).length} answered
+                        </p>
+                        <div className="mt-1.5 w-28 h-1.5 rounded-full bg-muted overflow-hidden">
+                          <div
+                            className="h-full rounded-full bg-primary transition-all"
+                            style={{
+                              width: `${Math.round((Object.keys(answers).length / (exam.questions?.length || 1)) * 100)}%`,
+                            }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                    <span
+                      className={`text-[11px] font-bold px-3 py-1.5 rounded-full shrink-0 ${
+                        answers[String(currentQuestion)] !== undefined
+                          ? "bg-emerald-500/10 text-emerald-600 border border-emerald-500/30"
+                          : "bg-amber-500/10 text-amber-600 border border-amber-500/30"
+                      }`}
+                    >
+                      {answers[String(currentQuestion)] !== undefined
+                        ? "✓ Answered"
+                        : "Not answered"}
+                    </span>
+                  </div>
+
+                  <div className="p-6 sm:p-8 space-y-6">
+                    <p className="font-bold text-foreground text-lg sm:text-2xl leading-relaxed">
+                      {exam.questions?.[currentQuestion]?.question}
+                    </p>
+
+                    <div className="space-y-3">
+                      {exam.questions?.[currentQuestion]?.options?.map((opt: string, oi: number) => {
+                        const selected = answers[String(currentQuestion)] === oi;
+                        return (
+                          <label
+                            key={oi}
+                            className={`flex items-center gap-4 p-4 rounded-2xl border transition-all ${
+                              selected
+                                ? "border-primary bg-primary/5 text-foreground font-medium shadow-md"
+                                : "border-border/80 hover:border-primary/40 hover:bg-muted/50 text-muted-foreground"
+                            } ${canAnswer ? "cursor-pointer" : "cursor-not-allowed opacity-60"}`}
+                          >
+                            <input
+                              type="radio"
+                              name={`q-${currentQuestion}`}
+                              checked={selected}
+                              disabled={!canAnswer}
+                              onChange={() => {
+                                if (!canAnswer) return;
+                                setAnswers({ ...answers, [String(currentQuestion)]: oi });
+                              }}
+                              className="w-5 h-5 accent-primary shrink-0"
+                            />
+                            <span
+                              className={`w-9 h-9 rounded-xl flex items-center justify-center text-sm font-bold shrink-0 border ${
+                                selected
+                                  ? "bg-primary text-primary-foreground border-primary"
+                                  : "bg-muted text-muted-foreground border-border"
+                              }`}
+                            >
+                              {String.fromCharCode(65 + oi)}
+                            </span>
+                            <span className="text-[15px] sm:text-base flex-1">
+                              {opt}
+                            </span>
+                            {selected && (
+                              <span className="material-symbols-outlined text-primary shrink-0">
+                                check_circle
+                              </span>
+                            )}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+
+              {/* Next / Submit — below the question */}
+              <div className="flex items-center justify-end">
+                {currentQuestion >= (exam.questions?.length || 1) - 1 ? (
+                  <button
+                    onClick={handleSubmit}
+                    disabled={submitting}
+                    className="px-7 py-2.5 bg-gradient-to-r from-primary to-blue-600 hover:from-primary/90 hover:to-blue-500 text-white font-bold rounded-xl text-sm transition shadow-lg shadow-primary/20 flex items-center gap-2 cursor-pointer disabled:opacity-70"
+                  >
+                    {submitting ? (
+                      <>
+                        <div className="w-4 h-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />
+                        <span>Submitting...</span>
+                      </>
+                    ) : (
+                      <>
+                        <span>Submit Exam</span>
+                        <span className="material-symbols-outlined text-lg">send</span>
+                      </>
+                    )}
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => setCurrentQuestion((c) => Math.min((exam.questions?.length || 1) - 1, c + 1))}
+                    className="px-7 py-2.5 bg-muted hover:bg-muted/60 text-foreground font-bold rounded-xl text-sm transition flex items-center gap-1.5"
+                  >
+                    Next
+                    <span className="material-symbols-outlined text-base">chevron_right</span>
+                  </button>
+                )}
               </div>
             </div>
           </div>
 
           {/* Right Live AI Proctoring Sidebar */}
           <div className="lg:w-88 border-t lg:border-t-0 lg:border-l border-border/80 bg-card p-5 space-y-5">
+            {/* Questions palette — jump to any question */}
+            <div className="pb-3 border-b border-border/80">
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-sm font-bold text-foreground">Questions</p>
+                <span className="text-[10px] font-medium text-muted-foreground">
+                  {Object.keys(answers).length}/{exam.questions?.length || 0} answered
+                </span>
+              </div>
+              <div className="grid grid-cols-5 gap-1.5">
+                {exam.questions?.map((_: any, i: number) => {
+                  const answered = answers[String(i)] !== undefined;
+                  const current = i === currentQuestion;
+                  return (
+                    <button
+                      key={i}
+                      onClick={() => setCurrentQuestion(i)}
+                      className={`h-8 rounded-lg text-xs font-bold transition flex items-center justify-center ${
+                        current
+                          ? "bg-primary text-primary-foreground ring-2 ring-primary/40"
+                          : answered
+                            ? "bg-primary/10 text-primary border border-primary/30 hover:bg-primary/20"
+                            : "bg-muted text-muted-foreground border border-border hover:bg-muted/60"
+                      }`}
+                    >
+                      {i + 1}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
             <div className="flex items-center justify-between pb-3 border-b border-border/80">
               <div className="flex items-center gap-2 text-sm font-bold text-foreground">
                 <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />

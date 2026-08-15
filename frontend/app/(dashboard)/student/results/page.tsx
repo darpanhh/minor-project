@@ -3,36 +3,9 @@
 import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { api, serverUrl } from "@/src/services/api";
+import { api } from "@/src/services/api";
 import ProtectedRoute from "@/src/components/ProtectedRoute";
-
-function EventBadge({ type }: { type: string }) {
-  const colors: Record<string, string> = {
-    tab_switch: "bg-amber-500/10 text-amber-600 border-amber-500/20",
-    multiple_faces: "bg-destructive/10 text-destructive border-destructive/20",
-    person_absent: "bg-destructive/10 text-destructive border-destructive/20",
-    identity_mismatch: "bg-destructive/10 text-destructive border-destructive/20",
-    phone_detected: "bg-destructive/10 text-destructive border-destructive/20",
-    object_detected: "bg-amber-500/10 text-amber-600 border-amber-500/20",
-    gaze_away: "bg-muted text-muted-foreground border-border",
-    head_pose_abnormal: "bg-muted text-muted-foreground border-border",
-  };
-
-  const formattedTitle =
-    type === "phone_detected"
-      ? "Mobile Phone Detected"
-      : type === "multiple_faces" || type === "multiple_persons"
-      ? "Multiple Persons Detected"
-      : type === "person_absent"
-      ? "Person Absent / No Face"
-      : type.replace(/_/g, " ").replace(/\b\w/g, (l) => l.toUpperCase());
-
-  return (
-    <span className={`inline-flex px-3 py-1 rounded-full text-xs font-bold border ${colors[type] || "bg-muted text-muted-foreground border-border"}`}>
-      {formattedTitle}
-    </span>
-  );
-}
+import { useAuth } from "@/src/contexts/AuthContext";
 
 export default function ResultsPage() {
   return (
@@ -52,26 +25,23 @@ export default function ResultsPage() {
 function ResultsContent() {
   const searchParams = useSearchParams();
   const sessionId = searchParams.get("session");
+  const { user } = useAuth();
   const [session, setSession] = useState<any>(null);
   const [exam, setExam] = useState<any>(null);
-  const [events, setEvents] = useState<any[]>([]);
   const [loading, setLoading] = useState(() => !sessionId);
 
   useEffect(() => {
-    if (!sessionId) return;
-    Promise.all([
-      api.mySessionDetail(sessionId),
-      api.getSessionEvents(sessionId).catch(() => []),
-    ])
-      .then(([s, ev]) => {
+    if (!sessionId || !user) return;
+    api
+      .mySessionDetail(sessionId)
+      .then((s) => {
         setSession(s);
-        setEvents(ev);
         return api.getExam(s.exam_id);
       })
       .then((e) => setExam(e))
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, [sessionId]);
+  }, [sessionId, user]);
 
   if (loading) return (
     <ProtectedRoute role="student">
@@ -162,54 +132,17 @@ function ResultsContent() {
           </div>
         )}
 
-        {/* Proctoring Log Card */}
-        <div className="bg-card border border-border/80 rounded-2xl p-6 shadow-sm space-y-4">
-          <div className="flex items-center justify-between pb-3 border-b border-border/80">
-            <div>
-              <h2 className="text-base font-bold text-foreground">Proctoring Log & Snapshots</h2>
-              <p className="text-xs text-muted-foreground">Automated evidence collected during your session</p>
-            </div>
-            <span className="text-xs font-bold text-foreground bg-muted px-2.5 py-1 rounded-lg border border-border">
-              {events.length} Events
-            </span>
+        {/* Proctoring Report Note — evidence is not shown to students;
+            it is shared by the administrator only if they choose to release it */}
+        <div className="bg-card border border-border/80 rounded-2xl p-5 flex items-start gap-4">
+          <span className="material-symbols-outlined text-2xl text-muted-foreground shrink-0">visibility_off</span>
+          <div className="space-y-1">
+            <p className="text-sm font-bold text-foreground">Proctoring Report</p>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              The proctoring log and evidence snapshots collected during your session are confidential
+              and are shared by the administrator only if they release the report to you.
+            </p>
           </div>
-
-          {events.length > 0 ? (
-            <div className="space-y-4">
-              {events.map((e: any) => (
-                <div key={e.id} className="border border-border/70 rounded-xl p-4 bg-background/50 space-y-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <EventBadge type={e.event_type} />
-                    <span className="text-[11px] text-muted-foreground font-mono">{new Date(e.timestamp).toLocaleString()}</span>
-                  </div>
-
-                  {e.snapshot_path ? (
-                    <a href={serverUrl(e.snapshot_path)} target="_blank" rel="noreferrer" className="block group">
-                      <div className="relative overflow-hidden rounded-xl border border-border bg-black">
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img
-                          src={serverUrl(e.snapshot_path)}
-                          alt={`${e.event_type.replace(/_/g, " ")} snapshot`}
-                          className="w-full max-h-64 object-cover group-hover:scale-102 transition-transform duration-200"
-                        />
-                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center text-white text-xs font-semibold transition-opacity">
-                          Click to View Full Resolution Evidence
-                        </div>
-                      </div>
-                    </a>
-                  ) : (
-                    <p className="text-xs text-muted-foreground italic">No image snapshot recorded for this event.</p>
-                  )}
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="text-center py-8 text-xs text-muted-foreground border border-dashed border-border rounded-xl">
-              <span className="material-symbols-outlined text-3xl text-emerald-500 mb-1">verified</span>
-              <p className="font-semibold text-foreground">Clean Academic Integrity Record</p>
-              <p className="mt-0.5">No proctoring violations were recorded during your exam session.</p>
-            </div>
-          )}
         </div>
 
         {/* Footer Navigation */}

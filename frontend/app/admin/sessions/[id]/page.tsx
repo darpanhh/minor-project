@@ -5,10 +5,12 @@ import { useParams } from "next/navigation";
 import Link from "next/link";
 import { api, serverUrl } from "@/src/services/api";
 import ProtectedRoute from "@/src/components/ProtectedRoute";
+import { useAuth } from "@/src/contexts/AuthContext";
 
 function EventBadge({ type }: { type: string }) {
   const colors: Record<string, string> = {
     tab_switch: "bg-amber-100 text-amber-700",
+    fullscreen_exit: "bg-amber-100 text-amber-700",
     multiple_faces: "bg-red-100 text-red-700",
     person_absent: "bg-red-100 text-red-700",
     identity_mismatch: "bg-red-100 text-red-700",
@@ -26,6 +28,8 @@ function EventBadge({ type }: { type: string }) {
 
 export default function AdminSessionDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const { user } = useAuth();
+  const isClientEvent = (type: string) => type === "tab_switch" || type === "fullscreen_exit";
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [finalScore, setFinalScore] = useState<string>("");
@@ -35,7 +39,7 @@ export default function AdminSessionDetailPage() {
   const [gradeError, setGradeError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!id) return;
+    if (!id || !user) return;
     api.getAdminSessionDetail(id)
       .then((d) => {
         setData(d);
@@ -44,7 +48,7 @@ export default function AdminSessionDetailPage() {
       })
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, [id]);
+  }, [id, user]);
 
   async function handleGrade() {
     if (!data || grading) return;
@@ -93,18 +97,18 @@ export default function AdminSessionDetailPage() {
     );
   }
 
-  const { session, events, alerts, cheating_logs, answers, questions } = data;
+  const { session, events, cheating_logs, answers, questions } = data;
   const reviewed = session.result_status === "reviewed";
   const snapshots = (events || []).filter((e: any) => e.snapshot_path);
 
   return (
     <ProtectedRoute role="admin">
       <div className="animate-fade-in">
-        <Link href="/admin/reports" className="text-sm text-slate-500 hover:text-slate-700 inline-flex items-center gap-1 mb-6">
+        <Link href="/admin/sessions" className="text-sm text-slate-500 hover:text-slate-700 inline-flex items-center gap-1 mb-6">
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
           </svg>
-          Back to Reports
+          Back to Sessions
         </Link>
 
         <div className="flex items-center justify-between mb-6">
@@ -327,9 +331,8 @@ export default function AdminSessionDetailPage() {
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8">
           {[
             { label: "Proctoring Events", value: events?.length || 0, color: "", icon: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" },
-            { label: "Alerts", value: alerts?.length || 0, color: "text-amber-600", icon: "M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" },
             { label: "Cheating Logs", value: cheating_logs?.length || 0, color: "text-red-600", icon: "M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" },
-            { label: "Tab Switches", value: events?.filter((e: any) => e.event_type === "tab_switch").length || 0, color: "text-amber-600", icon: "M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75" },
+            { label: "Tab Switches", value: events?.filter((e: any) => isClientEvent(e.event_type)).length || 0, color: "text-amber-600", icon: "M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75" },
           ].map((item, i) => (
             <div key={i} className="text-center border border-slate-200 rounded-xl p-4">
               <p className={`text-2xl font-bold ${item.color || "text-slate-900"}`}>{item.value}</p>
@@ -348,63 +351,60 @@ export default function AdminSessionDetailPage() {
           </div>
         )}
 
-        {alerts && alerts.length > 0 && (
-          <div className="content-card mb-8">
-            <h2 className="text-base font-semibold text-slate-900 mb-4">Alerts ({alerts.length})</h2>
-            <div className="space-y-2">
-              {alerts.map((a: any) => (
-                <div
-                  key={a.id}
-                  className={`flex items-center justify-between p-3.5 rounded-xl border ${
-                    a.severity === "high" ? "border-red-200 bg-red-50/50" :
-                    a.severity === "medium" ? "border-amber-200 bg-amber-50/50" :
-                    "border-slate-200"
-                  }`}
-                >
-                  <div className="flex items-center gap-3">
-                    <div className={`w-2 h-2 rounded-full ${
-                      a.severity === "high" ? "bg-red-500" :
-                      a.severity === "medium" ? "bg-amber-500" : "bg-slate-400"
-                    }`} />
-                    <span className={`status-badge ${
-                      a.severity === "high" ? "status-badge--danger" :
-                      a.severity === "medium" ? "status-badge--warning" : "status-badge--default"
-                    }`}>{a.severity}</span>
-                    <span className="text-sm font-medium text-slate-700">
-                      Suspicion: {Math.round(a.suspicion_score)}%
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className="text-xs text-slate-400">{new Date(a.created_at).toLocaleString()}</span>
-                    {!a.reviewed && (
-                      <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-medium">Unreviewed</span>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
         <div className="content-card mb-8">
-          <h2 className="text-base font-semibold text-slate-900 mb-4">Proctoring Events ({events?.length || 0})</h2>
+          <h2 className="text-base font-semibold text-slate-900 mb-1">Proctoring Events ({events?.length || 0})</h2>
+          <p className="text-sm text-slate-500 mb-4">
+            Chronological warning / incident history for this session. For tab switches and
+            fullscreen exits, the first occurrence is a warning only; repeated occurrences are
+            recorded as incidents with the time the student was away.
+          </p>
           {events?.length > 0 ? (
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
                   <tr className="border-b border-slate-100">
                     <th className="text-left py-3 pr-4 text-xs font-medium text-slate-500 uppercase tracking-wide">Event Type</th>
-                    <th className="text-left py-3 pr-4 text-xs font-medium text-slate-500 uppercase tracking-wide">Confidence</th>
                     <th className="text-left py-3 pr-4 text-xs font-medium text-slate-500 uppercase tracking-wide">Timestamp</th>
+                    <th className="text-left py-3 pr-4 text-xs font-medium text-slate-500 uppercase tracking-wide">Occurrence</th>
+                    <th className="text-left py-3 pr-4 text-xs font-medium text-slate-500 uppercase tracking-wide">Duration Away</th>
+                    <th className="text-left py-3 pr-4 text-xs font-medium text-slate-500 uppercase tracking-wide">Action Taken</th>
+                    <th className="text-left py-3 pr-4 text-xs font-medium text-slate-500 uppercase tracking-wide">Confidence</th>
                     <th className="text-left py-3 text-xs font-medium text-slate-500 uppercase tracking-wide">Snapshot</th>
                   </tr>
                 </thead>
                 <tbody>
                   {events.map((e: any) => (
-                    <tr key={e.id} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
+                    <tr key={e.id} className={`border-b border-slate-50 transition-colors ${
+                      isClientEvent(e.event_type)
+                        ? e.occurrence && e.occurrence >= 2
+                          ? "bg-red-50/50 hover:bg-red-50"
+                          : "bg-amber-50/50 hover:bg-amber-50"
+                        : "hover:bg-slate-50/50"
+                    }`}>
                       <td className="py-3 pr-4"><EventBadge type={e.event_type} /></td>
+                      <td className="py-3 pr-4 text-sm text-slate-700">{new Date(e.timestamp).toLocaleString()}</td>
+                      <td className="py-3 pr-4 text-sm text-slate-700">
+                        {isClientEvent(e.event_type) && e.occurrence
+                          ? `#${e.occurrence}`
+                          : <span className="text-slate-300">—</span>}
+                      </td>
+                      <td className="py-3 pr-4 text-sm text-slate-700">
+                        {isClientEvent(e.event_type) && e.duration != null
+                          ? `${e.duration >= 60 ? `${Math.floor(e.duration / 60)}m ` : ""}${(e.duration % 60).toFixed(1)}s`
+                          : <span className="text-slate-300">—</span>}
+                      </td>
+                      <td className="py-3 pr-4 text-sm">
+                        {e.action ? (
+                          <span className={`inline-flex px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                            isClientEvent(e.event_type) && e.occurrence && e.occurrence >= 2
+                              ? "bg-red-100 text-red-700"
+                              : "bg-amber-100 text-amber-700"
+                          }`}>{e.action}</span>
+                        ) : (
+                          <span className="text-slate-300">—</span>
+                        )}
+                      </td>
                       <td className="py-3 pr-4 text-sm text-slate-700">{(e.confidence * 100).toFixed(0)}%</td>
-                      <td className="py-3 pr-4 text-sm text-slate-400">{new Date(e.timestamp).toLocaleString()}</td>
                       <td className="py-3 text-sm">
                         {e.snapshot_path ? (
                           <a href={serverUrl(e.snapshot_path)} target="_blank" rel="noreferrer" className="text-indigo-600 hover:text-indigo-700 font-medium">View</a>

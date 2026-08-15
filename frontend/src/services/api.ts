@@ -151,11 +151,21 @@ class ApiClient {
     return this.request<any>("GET", `/sessions/${sessionId}`);
   }
 
-  logProctoringEvent(sessionId: string, eventType: string, confidence: number = 0, snapshot?: string) {
+  logProctoringEvent(
+    sessionId: string,
+    eventType: string,
+    confidence: number = 0,
+    snapshot?: string,
+    meta?: { timestamp?: string; occurrence?: number; duration?: number; action?: string }
+  ) {
     return this.request<any>("POST", `/sessions/${sessionId}/events`, {
       event_type: eventType,
       confidence,
       snapshot: snapshot || null,
+      ...(meta?.timestamp ? { timestamp: meta.timestamp } : {}),
+      ...(meta?.occurrence != null ? { occurrence: meta.occurrence } : {}),
+      ...(meta?.duration != null ? { duration: meta.duration } : {}),
+      ...(meta?.action ? { action: meta.action } : {}),
     });
   }
 
@@ -177,14 +187,6 @@ class ApiClient {
   }
 
   // --- Admin ---
-  listAlerts() {
-    return this.request<any[]>("GET", "/admin/alerts");
-  }
-
-  reviewAlert(alertId: string) {
-    return this.request<any>("POST", `/admin/alerts/${alertId}/review`);
-  }
-
   listAllSessions() {
     return this.request<any[]>("GET", "/admin/sessions");
   }

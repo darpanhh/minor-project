@@ -37,7 +37,7 @@ class ProctorDetector:
     class IDs dynamically from the model's own names dictionary.
     """
 
-    def __init__(self, model_path: str = "best.pt", conf_threshold: float = 0.45):
+    def __init__(self, model_path: str = "best.pt", conf_threshold: float = 0.25):
         self.model = YOLO(model_path)
         self.conf_threshold = conf_threshold
         self.sessions: dict[str, SessionState] = {}

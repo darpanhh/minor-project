@@ -5,19 +5,21 @@ import { useParams } from "next/navigation";
 import Link from "next/link";
 import { api } from "@/src/services/api";
 import ProtectedRoute from "@/src/components/ProtectedRoute";
+import { useAuth } from "@/src/contexts/AuthContext";
 
 export default function AdminExamDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const { user } = useAuth();
   const [exam, setExam] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!id) return;
+    if (!id || !user) return;
     api.getExam(id)
       .then(setExam)
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, [id]);
+  }, [id, user]);
 
   if (loading) {
     return (
