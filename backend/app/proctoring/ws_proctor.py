@@ -10,6 +10,7 @@ import base64
 import json
 import logging
 import os
+import time
 import uuid
 from collections import deque
 from datetime import datetime
@@ -25,7 +26,6 @@ from app.auth.jwt_handler import verify_token
 from app.models.exam import ExamSession
 from app.models.event import ProctoringEvent, EventType
 from app.proctoring.detector import ProctorDetector
-from app.services.suspicion_engine import evaluate_and_alert
 
 from app.proctoring.gaze.calibration import CalibrationProcessor
 from app.proctoring.gaze.gaze_service import GazeService
@@ -67,6 +67,63 @@ ALERT_TO_EVENT_TYPE: dict[str, EventType] = {
     "phone_detected": EventType.phone_detected,
     "person_absent": EventType.person_absent,
 }
+
+# ── Temporal violation state machine (all timers use monotonic time) ─
+ABSENCE_GRACE = 5.0
+MULTIPLE_PERSON_GRACE = 1.5
+PHONE_GRACE = 2.0
+VIOLATION_END_GRACE = 5.0
+SNAPSHOT_COOLDOWN = 10.0
+
+# Seconds a person must be continuously undetected before person_absent
+# counts as active (guards against single-frame YOLO detection flicker).
+PERSON_ABSENT_DEBOUNCE = 2.0
+
+GRACE_PERIODS: dict[str, float] = {
+    "phone_detected": PHONE_GRACE,
+    "multiple_persons": MULTIPLE_PERSON_GRACE,
+    "person_absent": ABSENCE_GRACE,
+}
+
+WARNING_MESSAGES: dict[str, str] = {
+    "phone_detected": "WARNING: Mobile phone detected. Please put away all devices.",
+    "multiple_persons": "WARNING: Multiple persons detected in frame. Please ensure you are alone.",
+    "person_absent": "WARNING: No person detected in frame. Please ensure you are visible to the camera.",
+}
+
+VIOLATION_MESSAGES: dict[str, str] = {
+    "phone_detected": "VIOLATION RECORDED: Mobile phone detected. This has been reported to the administrator.",
+    "multiple_persons": "VIOLATION RECORDED: Multiple persons detected in frame. This has been reported to the administrator.",
+    "person_absent": "VIOLATION RECORDED: No person detected in frame. This has been reported to the administrator.",
+}
+
+VIOLATION_REASONS = ("phone_detected", "multiple_persons", "person_absent")
+
+
+def _new_violation_state() -> dict:
+    """Phase machine: normal → warning → confirmed → recovering → normal."""
+    return {
+        "phase": "normal",  # normal | warning | confirmed | recovering
+        "warning_started_at": None,
+        "recovery_started_at": None,
+        "event_id": None,
+    }
+
+
+def _detection_confidence(detector, result: dict, reason: str) -> float:
+    """Highest matching detection confidence for a confirmed reason."""
+    target_class = None
+    if reason == "phone_detected":
+        target_class = detector.phone_class_id
+    elif reason == "multiple_persons":
+        target_class = detector.person_class_id
+    if target_class is None:
+        return 1.0  # person absent — no object to score
+    conf = 0.0
+    for det in result["detections"]:
+        if det["class_id"] == target_class and det["confidence"] > conf:
+            conf = det["confidence"]
+    return conf or 0.0
 
 
 def _decode_frame(data_url_or_b64: str) -> np.ndarray | None:
@@ -128,8 +185,8 @@ def _persist_event(
     event_type: EventType,
     confidence: float,
     snapshot_path: str | None,
-) -> None:
-    """Insert a ProctoringEvent row."""
+) -> ProctoringEvent | None:
+    """Insert a ProctoringEvent row and return it (or None on failure)."""
     try:
         event = ProctoringEvent(
             session_id=session_id,
@@ -139,9 +196,12 @@ def _persist_event(
         )
         db.add(event)
         db.commit()
+        db.refresh(event)
+        return event
     except Exception:
         db.rollback()
         logger.exception("Failed to persist proctoring event")
+        return None
 
 
 def _load_calibration(gaze_service: GazeService, session_uuid: uuid.UUID) -> None:
@@ -232,9 +292,9 @@ async def proctor_ws(
         await websocket.close(code=1011, reason="Detector initialization failed")
         return
 
-    # Track warnings per session to implement warning-first logic
-    # reason -> {"first_seen": timestamp, "last_seen": timestamp, "confirmed": bool, "logged_once": bool, "last_log_time": timestamp}
-    violation_states: dict[str, dict] = {}
+    # Per-reason temporal state machine for warning-first violation logic
+    violation_states: dict[str, dict] = {r: _new_violation_state() for r in VIOLATION_REASONS}
+    last_snapshot_at: float | None = None  # monotonic timestamp of the last evidence snapshot
 
     # Recent frames (timestamp, base64) used to snapshot the violation-start moment
     frame_buffer: deque[tuple[float, str]] = deque(maxlen=FRAME_BUFFER_MAXLEN)
@@ -281,134 +341,146 @@ async def proctor_ws(
                          gaze_result.get("predicted_point", "?"),
                          gaze_result.get("confidence", 0.0))
 
-            # --- State tracking for warning-first logic ---
-            now_ts = datetime.now().timestamp()
-            # Derive active reasons from the per-frame detection flags (NOT from
-            # the detector's throttled snapshot_reasons, which only appears once
-            # per 10s and would break continuity/confirmation).
+            # ── Temporal violation state machine (per-frame) ─────────────
+            # Derive active reasons from per-frame detection flags (NOT from
+            # the detector's throttled snapshot_reasons).
             current_reasons = set()
             if result.get("phone_detected"):
                 current_reasons.add("phone_detected")
             if (result.get("person_count") or 0) > 1:
                 current_reasons.add("multiple_persons")
-            if (result.get("person_count") or 0) == 0:
+            # Person absence is DEBOUNCED: it only counts after the person has
+            # been undetected for PERSON_ABSENT_DEBOUNCE seconds continuously.
+            # The YOLO model misses the person on isolated frames (flicker),
+            # which would otherwise keep the violation confirmed forever.
+            if (result.get("person_count") or 0) == 0 and (
+                time.time() - detector.get_state(str(session_uuid)).last_person_seen
+                >= PERSON_ABSENT_DEBOUNCE
+            ):
                 current_reasons.add("person_absent")
 
-            # Clean up stale violation states where the violation has stopped for > 5 seconds
-            stale_reasons = []
-            for r, state in violation_states.items():
-                if r not in current_reasons:
-                    if now_ts - state["last_seen"] > 5.0:
-                        stale_reasons.append(r)
-            for r in stale_reasons:
-                violation_states.pop(r, None)
+            now_mono = time.monotonic()
+            new_alerts: list[dict] = []
+            active_warnings: list[dict] = []
+            newly_confirmed: list[str] = []
 
-            confirmed_snapshot_reasons = []
-            modified_alerts = []
+            for reason, state in violation_states.items():
+                active = reason in current_reasons
 
-            for r in current_reasons:
-                if r not in violation_states:
-                    violation_states[r] = {
-                        "first_seen": now_ts,
-                        "last_seen": now_ts,
-                        "confirmed": False,
-                        "logged_once": False
-                    }
+                if active:
+                    if state["phase"] == "normal":
+                        # DETECT → WARN: show warning immediately, start grace timer
+                        state["phase"] = "warning"
+                        state["warning_started_at"] = now_mono
+                        new_alerts.append({"type": reason, "message": WARNING_MESSAGES[reason]})
+                    elif state["phase"] == "warning":
+                        # WARN → CONFIRM once the grace period is exceeded
+                        if now_mono - state["warning_started_at"] >= GRACE_PERIODS[reason]:
+                            state["phase"] = "confirmed"
+                            state["warning_started_at"] = None
+                            newly_confirmed.append(reason)
+                            new_alerts.append({"type": reason, "message": VIOLATION_MESSAGES[reason]})
+                    elif state["phase"] == "recovering":
+                        # Violation returned within the end-grace: episode continues
+                        state["phase"] = "confirmed"
+                        state["recovery_started_at"] = None
+                    # phase == "confirmed": keep active, do NOT create events per frame
                 else:
-                    violation_states[r]["last_seen"] = now_ts
+                    if state["phase"] == "warning":
+                        # Condition ended before confirmation: reset timer, remove warning
+                        state["phase"] = "normal"
+                        state["warning_started_at"] = None
+                    elif state["phase"] == "confirmed":
+                        # Condition ended: move to RECOVERING and start the end-grace timer
+                        state["phase"] = "recovering"
+                        state["recovery_started_at"] = now_mono
+                    elif state["phase"] == "recovering":
+                        if now_mono - state["recovery_started_at"] >= VIOLATION_END_GRACE:
+                            # Episode fully ended → reset to NORMAL
+                            state["phase"] = "normal"
+                            state["recovery_started_at"] = None
+                            state["event_id"] = None
 
-                state = violation_states[r]
-                active_duration = now_ts - state["first_seen"]
-
-                base_msg = ""
-                if r == "phone_detected":
-                    base_msg = "Mobile phone detected."
-                    print("[DETECTOR] Mobile phone detected.")
-                elif r == "multiple_persons":
-                    base_msg = "Multiple persons detected in frame."
-                    print("[DETECTOR] Multiple persons detected in frame.")
-                elif r == "person_absent":
-                    base_msg = "No person detected in frame."
-                    print("[DETECTOR] No person detected in frame.")
-
-                grace_sec = 5.0 if r == "person_absent" else 2.0
-                if active_duration < grace_sec:
-                    # Within warning grace period: warn on-screen, DO NOT log to DB
-                    warn_msg = f"WARNING: {base_msg} Please ensure you are alone and put away all devices."
-                    modified_alerts.append({
-                        "type": r,
-                        "message": warn_msg
+                # Live warning state for the main-screen overlay. The banner
+                # disappears the instant the condition is no longer detected:
+                # recovering is kept internally (episode continuity) but is NOT
+                # shown, so a cleared violation clears the screen immediately.
+                if state["phase"] == "warning":
+                    active_warnings.append({
+                        "type": reason,
+                        "message": WARNING_MESSAGES[reason],
+                        "level": "warning",
                     })
-                else:
-                    # Violation persisted past grace period! Confirm and record
-                    state["confirmed"] = True
-                    should_log = False
-
-                    if not state["logged_once"]:
-                        should_log = True
-                        state["logged_once"] = True
-                        state["last_log_time"] = now_ts
-                    elif now_ts - state.get("last_log_time", 0.0) >= 10.0:
-                        should_log = True
-                        state["last_log_time"] = now_ts
-
-                    if should_log:
-                        confirmed_snapshot_reasons.append(r)
-
-                    violation_msg = f"VIOLATION RECORDED: {base_msg} This has been reported to the administrator."
-                    modified_alerts.append({
-                        "type": r,
-                        "message": violation_msg
+                elif state["phase"] == "confirmed":
+                    active_warnings.append({
+                        "type": reason,
+                        "message": VIOLATION_MESSAGES[reason],
+                        "level": "violation",
                     })
 
-            # Override default alerts with user-friendly stateful alerts
-            if modified_alerts:
-                result["alerts"] = modified_alerts
-
-            # ── Save snapshots & persist DB events (ONLY for confirmed/throttled reasons) ───────────────────
+            # ── Confirmations: ONE event per reason per episode, ONE snapshot
+            #    for the same confirmation moment (shared across simultaneous
+            #    violations), subject to the snapshot cooldown ──────────────
             snapshots: list[str] = []
-            if confirmed_snapshot_reasons:
+            if newly_confirmed:
                 db = SessionLocal()
                 try:
-                    for reason in confirmed_snapshot_reasons:
+                    snapshot_url = None
+                    if last_snapshot_at is None or now_mono - last_snapshot_at >= SNAPSHOT_COOLDOWN:
+                        fname = _save_snapshot(str(session_uuid), frame, "+".join(newly_confirmed))
+                        snapshot_url = f"/snapshots/{fname}"
+                        snapshots.append(snapshot_url)
+                        last_snapshot_at = now_mono
+
+                    for reason in newly_confirmed:
                         try:
-                            # Snapshot the frame from when this violation first appeared
-                            state = violation_states.get(reason, {})
-                            start_ts = state.get("first_seen", now_ts)
-                            snap_frame = _snapshot_frame_for_time(frame_buffer, start_ts, frame)
-                            fname = _save_snapshot(str(session_uuid), snap_frame, reason)
-                            snapshot_url = f"/snapshots/{fname}"
-                            snapshots.append(snapshot_url)
-
-                            # Map reason → EventType and persist
                             etype = ALERT_TO_EVENT_TYPE.get(reason)
-                            if etype:
-                                # Use the highest confidence from matching detections
-                                # Use dynamic class IDs from the loaded model (works with any weights)
-                                conf = 0.0
-                                target_class = None
-                                if reason == "phone_detected":
-                                    target_class = detector.phone_class_id
-                                elif reason == "multiple_persons":
-                                    target_class = detector.person_class_id
-
-                                if target_class is not None:
-                                    for det in result["detections"]:
-                                        if det["class_id"] == target_class and det["confidence"] > conf:
-                                            conf = det["confidence"]
-                                else:
-                                    conf = 1.0 # default for person absent
-
-                                _persist_event(db, session_uuid, etype, conf, snapshot_url)
+                            if not etype:
+                                continue
+                            conf = _detection_confidence(detector, result, reason)
+                            event = _persist_event(db, session_uuid, etype, conf, snapshot_url)
+                            violation_states[reason]["event_id"] = event.id if event else None
+                            logger.info(
+                                "Violation confirmed: %s (conf=%.2f snapshot=%s)",
+                                reason, conf, snapshot_url,
+                            )
                         except Exception:
                             logger.exception(
-                                "Failed to process confirmed violation reason %s for session %s",
+                                "Failed to persist confirmed violation %s for session %s",
                                 reason, session_uuid,
                             )
-                    
-                    evaluate_and_alert(db, session_uuid)
                 finally:
                     db.close()
+
+            # ── Cooldown only gates REPEATED evidence snapshots: while a
+            #    confirmed violation stays active, refresh its snapshot every
+            #    10s WITHOUT creating new DB events ────────────────────────
+            refresh_reasons = [
+                r for r, s in violation_states.items() if s["phase"] in ("confirmed", "recovering")
+            ]
+            if refresh_reasons and (last_snapshot_at is None or now_mono - last_snapshot_at >= SNAPSHOT_COOLDOWN):
+                db = SessionLocal()
+                try:
+                    fname = _save_snapshot(str(session_uuid), frame, "+".join(refresh_reasons))
+                    snapshot_url = f"/snapshots/{fname}"
+                    snapshots.append(snapshot_url)
+                    last_snapshot_at = now_mono
+                    for reason in refresh_reasons:
+                        event_id = violation_states[reason].get("event_id")
+                        if not event_id:
+                            continue
+                        event = db.get(ProctoringEvent, event_id)
+                        if event:
+                            event.snapshot_path = snapshot_url
+                    db.commit()
+                    logger.info("Refreshed evidence snapshot for active violations: %s", refresh_reasons)
+                finally:
+                    db.close()
+
+            result["alerts"] = new_alerts
+            result["active_warnings"] = active_warnings
+            result["snapshots"] = snapshots
+            result["snapshot_reasons"] = newly_confirmed
 
             # ── Persist gaze/head events (completely additive) ──────────
             gaze_events = gaze_service.get_pending_events()
@@ -429,7 +501,7 @@ async def proctor_ws(
                         # not the current frame after they may have looked back.
                         snap_frame = _snapshot_frame_for_time(
                             frame_buffer,
-                            ev.get("start_time", now_ts),
+                            ev.get("start_time", time.time()),
                             frame,
                         )
                         fname = _save_snapshot(str(session_uuid), snap_frame, ev["violation_type"])
@@ -443,12 +515,9 @@ async def proctor_ws(
                             "type": ev["violation_type"],
                             "message": f"VIOLATION RECORDED: {ev['violation_type'].replace('_', ' ').title()} detected for {ev['duration']:.0f}s.",
                         })
-                    evaluate_and_alert(db_gaze, session_uuid)
                 finally:
                     db_gaze.close()
 
-            result["snapshots"] = snapshots
-            result["snapshot_reasons"] = confirmed_snapshot_reasons
             result["gaze"] = gaze_result
             await websocket.send_json(result)
 

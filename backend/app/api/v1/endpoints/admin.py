@@ -6,64 +6,17 @@ from app.core.database import get_db
 from app.auth.dependencies import require_role
 from app.models.user import User, UserRole
 from app.models.exam import ExamSession, SessionStatus, ResultStatus
-from app.models.event import Alert, ProctoringEvent
+from app.models.event import ProctoringEvent
 from app.models.exam import Exam
 from app.models.report import CheatingLog
-from app.schemas.event_schema import AlertOut
-from app.services.suspicion_engine import compute_suspicion_score
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
-class AlertOutWithDetails(AlertOut):
-    session_id: uuid.UUID
-
-    model_config = {"from_attributes": True}
-
-
 class GradeRequest(BaseModel):
     final_score: float
     notes: str | None = None
-
-
-@router.get("/alerts", response_model=list[dict])
-def list_alerts(
-    db: Session = Depends(get_db),
-    admin: User = Depends(require_role(UserRole.admin)),
-):
-    alerts = db.query(Alert).order_by(Alert.created_at.desc()).limit(50).all()
-    result = []
-    for a in alerts:
-        session = db.query(ExamSession).filter(ExamSession.id == a.session_id).first()
-        student = db.query(User).filter(User.id == session.student_id).first() if session else None
-        exam = db.query(Exam).filter(Exam.id == session.exam_id).first() if session else None
-        result.append({
-            "id": str(a.id),
-            "session_id": str(a.session_id),
-            "suspicion_score": a.suspicion_score,
-            "severity": a.severity.value,
-            "reviewed": a.reviewed,
-            "created_at": a.created_at.isoformat(),
-            "student_name": student.full_name if student else "Unknown",
-            "exam_title": exam.title if exam else "Unknown",
-        })
-    return result
-
-
-@router.post("/alerts/{alert_id}/review", response_model=AlertOutWithDetails)
-def review_alert(
-    alert_id: uuid.UUID,
-    db: Session = Depends(get_db),
-    admin: User = Depends(require_role(UserRole.admin)),
-):
-    alert = db.query(Alert).filter(Alert.id == alert_id).first()
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alert not found")
-    alert.reviewed = True
-    db.commit()
-    db.refresh(alert)
-    return alert
 
 
 @router.get("/sessions", response_model=list[dict])
@@ -101,8 +54,6 @@ def list_reports(
     for s in sessions:
         student = db.query(User).filter(User.id == s.student_id).first()
         exam = db.query(Exam).filter(Exam.id == s.exam_id).first()
-        score = compute_suspicion_score(db, str(s.id))
-        alert_count = db.query(Alert).filter(Alert.session_id == s.id).count()
         event_count = db.query(ProctoringEvent).filter(ProctoringEvent.session_id == s.id).count()
         result.append({
             "session_id": str(s.id),
@@ -114,8 +65,6 @@ def list_reports(
             "score": s.score,
             "final_score": s.final_score,
             "result_status": s.result_status.value if s.result_status else "pending",
-            "suspicion_score": score,
-            "alert_count": alert_count,
             "event_count": event_count,
             "started_at": s.started_at.isoformat() if s.started_at else None,
             "submitted_at": s.submitted_at.isoformat() if s.submitted_at else None,
@@ -138,14 +87,9 @@ def get_session_detail(
     events = db.query(ProctoringEvent).filter(
         ProctoringEvent.session_id == session_id
     ).order_by(ProctoringEvent.timestamp.desc()).all()
-    alerts = db.query(Alert).filter(
-        Alert.session_id == session_id
-    ).order_by(Alert.created_at.desc()).all()
     cheating_logs = db.query(CheatingLog).filter(
         CheatingLog.session_id == session_id
     ).order_by(CheatingLog.created_at.desc()).all()
-
-    suspicion_score = compute_suspicion_score(db, str(session_id))
 
     return {
         "session": {
@@ -162,7 +106,6 @@ def get_session_detail(
             "result_status": session.result_status.value if session.result_status else "pending",
             "admin_notes": session.admin_notes,
             "reviewed_at": session.reviewed_at.isoformat() if session.reviewed_at else None,
-            "suspicion_score": suspicion_score,
             "started_at": session.started_at.isoformat() if session.started_at else None,
             "submitted_at": session.submitted_at.isoformat() if session.submitted_at else None,
         },
@@ -174,14 +117,10 @@ def get_session_detail(
             "confidence": round(e.confidence, 2),
             "timestamp": e.timestamp.isoformat(),
             "snapshot_path": e.snapshot_path,
+            "occurrence": e.occurrence,
+            "duration": round(e.duration, 1) if e.duration is not None else None,
+            "action": e.action,
         } for e in events],
-        "alerts": [{
-            "id": str(a.id),
-            "severity": a.severity.value,
-            "suspicion_score": a.suspicion_score,
-            "reviewed": a.reviewed,
-            "created_at": a.created_at.isoformat(),
-        } for a in alerts],
         "cheating_logs": [{
             "id": str(c.id),
             "evidence_path": c.evidence_path,

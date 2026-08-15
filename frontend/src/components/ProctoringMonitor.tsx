@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 interface Detection {
   class_id: number;
@@ -12,6 +13,12 @@ interface Detection {
 interface Alert {
   type: string;
   message: string;
+}
+
+interface ActiveWarning {
+  type: string;
+  message: string;
+  level: "warning" | "violation";
 }
 
 interface GazeData {
@@ -32,6 +39,7 @@ interface ProctorResult {
   phone_detected: boolean;
   detections: Detection[];
   alerts: Alert[];
+  active_warnings?: ActiveWarning[];
   snapshot_reasons: string[];
   snapshots?: string[];
   gaze?: GazeData;
@@ -68,7 +76,8 @@ export default function ProctoringMonitor({
   const connectRef = useRef<(() => void) | null>(null);
 
   const [connected, setConnected] = useState(false);
-  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [activeWarnings, setActiveWarnings] = useState<ActiveWarning[]>([]);
+  const [mounted, setMounted] = useState(false);
   const [gazeStatus, setGazeStatus] = useState<string | null>("normal");
   const [gazeAngles, setGazeAngles] = useState<string>("");
   const [wsError, setWsError] = useState(false);
@@ -307,6 +316,7 @@ export default function ProctoringMonitor({
       ws.onclose = (e) => {
         if (!mountedRef.current) return;
         setConnected(false);
+        setActiveWarnings([]);
 
         console.warn("Proctor WS closed: code=%d reason=%s", e.code, e.reason);
 
@@ -331,6 +341,7 @@ export default function ProctoringMonitor({
       ws.onerror = () => {
         if (!mountedRef.current) return;
         setConnected(false);
+        setActiveWarnings([]);
         setWsError(true);
       };
 
@@ -346,6 +357,10 @@ export default function ProctoringMonitor({
 
           const result = data as ProctorResult;
           drawOverlay(result.detections);
+
+          if (result.active_warnings) {
+            setActiveWarnings(result.active_warnings);
+          }
 
           if (result.gaze) {
             gazeRef.current = result.gaze;
@@ -365,9 +380,8 @@ export default function ProctoringMonitor({
             const alreadyShown = alertsRef.current.some((a) => a.type === alert.type && a.message === alert.message);
             if (!alreadyShown) {
               alertsRef.current = [alert, ...alertsRef.current].slice(0, 30);
-              setAlerts([...alertsRef.current]);
+              onAlertRef.current?.(alert);
             }
-            onAlertRef.current?.(alert);
           }
         } catch {
           // ignore parse errors
@@ -395,8 +409,11 @@ export default function ProctoringMonitor({
     reconnectAttemptRef.current = 0;
     connectRef.current?.();
 
+    setMounted(true);
+
     return () => {
       mountedRef.current = false;
+      setMounted(false);
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
@@ -440,10 +457,33 @@ export default function ProctoringMonitor({
     return () => clearInterval(interval);
   }, [videoRef, wsError, fatalError]);
 
-  const isViolation = (msg: string) => msg.startsWith("VIOLATION RECORDED:");
-
   return (
     <div className="w-full">
+      {/* ── Main-screen warning overlay (over the exam, not below the camera) ── */}
+      {mounted &&
+        activeWarnings.length > 0 &&
+        createPortal(
+          <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[100] w-[min(92vw,640px)] space-y-2 pointer-events-none">
+            {activeWarnings.map((w) => (
+              <div
+                key={w.type}
+                role="alert"
+                className={`w-full px-5 py-4 rounded-2xl shadow-2xl border-2 font-bold text-sm sm:text-base text-center flex items-center justify-center gap-2.5 ${
+                  w.level === "violation"
+                    ? "bg-red-600 border-red-400 text-white"
+                    : "bg-amber-400 border-amber-300 text-amber-950"
+                }`}
+              >
+                <span className="material-symbols-outlined text-xl shrink-0">
+                  {w.level === "violation" ? "gavel" : "warning"}
+                </span>
+                <span>{w.message}</span>
+              </div>
+            ))}
+          </div>,
+          document.body
+        )}
+
       <div className="relative w-full aspect-video">
         <video
           ref={videoRef}
@@ -507,32 +547,6 @@ export default function ProctoringMonitor({
           </>
         )}
       </div>
-
-      {alerts.length > 0 && (
-        <div className="mt-2 space-y-1.5">
-          {alerts.map((a, i) => (
-            <div
-              key={i}
-              className={`text-xs px-3 py-2 rounded-lg flex items-start gap-2 ${
-                isViolation(a.message)
-                  ? "bg-red-50 border border-red-200 text-red-700"
-                  : "bg-amber-50 border border-amber-200 text-amber-800"
-              }`}
-            >
-              {isViolation(a.message) ? (
-                <svg className="w-3.5 h-3.5 mt-0.5 shrink-0 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
-                </svg>
-              ) : (
-                <svg className="w-3.5 h-3.5 mt-0.5 shrink-0 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
-                </svg>
-              )}
-              <span>{a.message}</span>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

@@ -135,8 +135,7 @@ class GazeService:
                 "duration": 4.2,
             }
 
-        The caller should persist these via _persist_event() then call
-        evaluate_and_alert().
+        The caller should persist these via _persist_event().
         """
         now = time.time()
         pending = []

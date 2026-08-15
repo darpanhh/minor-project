@@ -1,7 +1,7 @@
 import uuid
 import enum
 from datetime import datetime
-from sqlalchemy import String, Float, Enum, DateTime, Boolean, ForeignKey, func
+from sqlalchemy import String, Float, Integer, Enum, DateTime, Boolean, ForeignKey, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
@@ -17,12 +17,6 @@ class EventType(str, enum.Enum):
     phone_detected = "phone_detected"
     person_absent = "person_absent"
     fullscreen_exit = "fullscreen_exit"
-
-
-class Severity(str, enum.Enum):
-    low = "low"
-    medium = "medium"
-    high = "high"
 
 
 class ProctoringEvent(Base):
@@ -43,23 +37,11 @@ class ProctoringEvent(Base):
     )
     snapshot_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
+    # Tab-switch metadata (client-side events): which occurrence in the
+    # session, how long the student stayed away (seconds), and what the
+    # system/student did (e.g. "warning issued", "incident recorded").
+    occurrence: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration: Mapped[float | None] = mapped_column(Float, nullable=True)
+    action: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
     session = relationship("ExamSession", back_populates="proctoring_events")
-
-
-class Alert(Base):
-    __tablename__ = "alerts"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    session_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("exam_sessions.id"), nullable=False, index=True
-    )
-    suspicion_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
-    severity: Mapped[Severity] = mapped_column(Enum(Severity), nullable=False)
-    reviewed: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-    session = relationship("ExamSession", back_populates="alerts")

@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { api } from "@/src/services/api";
+import { useAuth } from "@/src/contexts/AuthContext";
 // Local fallback Button to avoid missing import during verification
 function Button({
   children,
@@ -25,21 +26,23 @@ function Button({
   );
 }
 
-interface CheckItem {
-  id: string;
-  label: string;
-  description: string;
-  icon: string;
-  status: "pending" | "in_progress" | "complete" | "error";
-}
-
 interface CalibrationPoint {
   id: string;
   label: string;
+  description?: string;
   x?: number;
   y?: number;
   image?: string;
 }
+
+const EXAM_RULES: { icon: string; title: string; detail: string }[] = [
+  { icon: "fullscreen", title: "Fullscreen & Camera ON", detail: "Answer only in fullscreen; keep your camera on for the whole exam." },
+  { icon: "visibility", title: "Complete Calibration", detail: "Do the eye and head calibration properly — follow every prompt before starting." },
+  { icon: "smartphone", title: "No Phones, Clear Desk", detail: "No mobile devices, notes, or other people in the camera frame." },
+  { icon: "tab", title: "No Tab Switching / Gazing Away", detail: "Stay in the exam window and watch the screen — both are monitored." },
+  { icon: "warning", title: "Violations Are Recorded", detail: "All violations are recorded with timestamps and reviewed by the admin." },
+  { icon: "timer", title: "Auto-Submit on Timer", detail: "The exam submits when the timer hits zero; unanswered questions score zero." },
+];
 
 const EYE_CALIBRATION_POINTS: CalibrationPoint[] = [
   { id: "top_left", label: "Top Left", x: 5, y: 6 },
@@ -49,9 +52,9 @@ const EYE_CALIBRATION_POINTS: CalibrationPoint[] = [
 ];
 
 const HEAD_CALIBRATION_POINTS: CalibrationPoint[] = [
-  { id: "head_forward", label: "Forward", image: "/forward.jpeg" },
-  { id: "head_left", label: "Left", image: "/left.jpeg" },
-  { id: "head_right", label: "Right", image: "/right.jpeg" },
+  { id: "head_forward", label: "Center", description: "Look like the image — Center (face straight ahead)", image: "/forward.jpeg" },
+  { id: "head_left", label: "Left", description: "Look like the image — Left (turn your head to the LEFT)", image: "/left.jpeg" },
+  { id: "head_right", label: "Right", description: "Look like the image — Right (turn your head to the RIGHT)", image: "/right.jpeg" },
 ];
 
 const WS_BASE =
@@ -59,79 +62,58 @@ const WS_BASE =
 // ~2s per calibration point (20 frames at 100ms) — stays under the 3s limit.
 const FRAMES_PER_POINT = 20;
 const CAPTURE_INTERVAL_MS = 100;
+// Time-based capture: the student looks at the point for 3 seconds, then
+// the 20 frames are captured automatically.
+const COUNTDOWN_SECONDS = 3;
 
 export default function VerifyPage() {
   const params = useParams();
   const router = useRouter();
-  const [checks, setChecks] = useState<CheckItem[]>([
-    { id: "camera", label: "Camera Access", description: "High-definition enabled", icon: "videocam", status: "pending" },
-    { id: "audio", label: "Audio Check", description: "System default input active", icon: "mic", status: "pending" },
-    { id: "face", label: "Identity Match", description: "Biometric verification", icon: "badge", status: "pending" },
-    { id: "room", label: "Room Scan", description: "Detecting surroundings...", icon: "room_preferences", status: "pending" },
-  ]);
-  const [phase, setPhase] = useState<"checks" | "calibration" | "complete">("checks");
-  const [activeSet, setActiveSet] = useState<"eye" | "head">("eye");
+  const { user } = useAuth();
+  const [agreed, setAgreed] = useState(false);
+  const [agreeError, setAgreeError] = useState(false);
+  const [phase, setPhase] = useState<"rules" | "calibration" | "head" | "complete">("rules");
   const [points, setPoints] = useState<CalibrationPoint[]>(EYE_CALIBRATION_POINTS);
   const [calibrationPointIndex, setCalibrationPointIndex] = useState(0);
   const [capturedFrames, setCapturedFrames] = useState(0);
+  const [capturing, setCapturing] = useState(false);
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [session, setSession] = useState<any>(null);
   const [starting, setStarting] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const pipRef = useRef<HTMLVideoElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const calibratingRef = useRef(true);
-  const [isFullscreen, setIsFullscreen] = useState<boolean>(() =>
-    typeof document !== "undefined" && !!document.fullscreenElement
-  );
+  const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ── Track fullscreen state ─────────────────────────────────────
   useEffect(() => {
-    const onChange = () => setIsFullscreen(!!document.fullscreenElement);
-    document.addEventListener("fullscreenchange", onChange);
-    return () => document.removeEventListener("fullscreenchange", onChange);
+    const handler = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", handler);
+    return () => document.removeEventListener("fullscreenchange", handler);
   }, []);
 
-  const enterFullscreen = useCallback(async () => {
-    try {
-      if (!document.fullscreenElement) {
-        await document.documentElement.requestFullscreen();
-      }
-      setIsFullscreen(true);
-    } catch (err) {
-      console.error("Fullscreen request failed:", err);
+  // The camera preview only exists inside the fullscreen calibration UI,
+  // so the live stream must be re-attached whenever it (re)mounts.
+  useEffect(() => {
+    if (pipRef.current && mediaStreamRef.current) {
+      pipRef.current.srcObject = mediaStreamRef.current;
     }
-  }, []);
+  }, [isFullscreen, phase]);
 
-  // ── Existing verification checks (unchanged logic) ─────────────
+  // ── Fetch the exam session for calibration ─────────────────────
   useEffect(() => {
-    const runChecksAndFetchSession = async () => {
-      for (let i = 0; i < checks.length; i++) {
-        setChecks((prev) =>
-          prev.map((c, idx) =>
-            idx === i ? { ...c, status: "in_progress" as const } : c
-          )
-        );
-        await new Promise((r) => setTimeout(r, 1000));
-        setChecks((prev) =>
-          prev.map((c, idx) =>
-            idx === i ? { ...c, status: "complete" as const } : c
-          )
-        );
-      }
-      try {
-        const s = await api.mySessionForExam(params.id as string);
-        if (s) setSession(s);
-      } catch (err) {
-        console.error("Failed to fetch session:", err);
-      }
-      setPhase("calibration");
-    };
-    runChecksAndFetchSession();
-  }, [checks.length, params.id]);
+    if (!user) return;
+    api.mySessionForExam(params.id as string)
+      .then((s) => { if (s) setSession(s); })
+      .catch((err) => console.error("Failed to fetch session:", err));
+  }, [params.id, user]);
 
-  // ── Start camera for calibration ───────────────────────────────
+  // ── Start camera for calibration (eye + head phases) ───────────
   useEffect(() => {
-    if (phase !== "calibration") return;
+    if (phase !== "calibration" && phase !== "head") return;
 
     let cancelled = false;
     const start = async () => {
@@ -147,6 +129,9 @@ export default function VerifyPage() {
         mediaStreamRef.current = stream;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
+        }
+        if (pipRef.current) {
+          pipRef.current.srcObject = stream;
         }
       } catch (err) {
         console.error("Camera access failed:", err);
@@ -189,11 +174,9 @@ export default function VerifyPage() {
     return `${wsUrl}/calibration/${session?.id || params.id}`;
   }, [session?.id, params.id]);
 
-  const [capturing, setCapturing] = useState(false);
-
-  // ── Connect WebSocket on calibration start ─────────────────────
+  // ── Connect WebSocket on calibration start (eye + head) ────────
   useEffect(() => {
-    if (phase !== "calibration") return;
+    if (phase !== "calibration" && phase !== "head") return;
     calibratingRef.current = true;
     const url = buildCalibrationUrl();
     const ws = new WebSocket(url);
@@ -214,17 +197,13 @@ export default function VerifyPage() {
     const ws = wsRef.current;
     const video = videoRef.current;
     if (!ws || !video || ws.readyState !== WebSocket.OPEN) return;
-    if (!document.fullscreenElement) return;
 
-    const point = points[calibrationPointIndex];
     setCapturing(true);
     setCapturedFrames(0);
 
     let framesCaptured = 0;
     for (let f = 0; f < FRAMES_PER_POINT; f++) {
       if (!calibratingRef.current) return;
-      // Abort capture if the student leaves fullscreen mid-recording.
-      if (!document.fullscreenElement) break;
       const captureCanvas = document.createElement("canvas");
       captureCanvas.width = video.videoWidth || 640;
       captureCanvas.height = video.videoHeight || 480;
@@ -233,7 +212,7 @@ export default function VerifyPage() {
         ctx.drawImage(video, 0, 0);
         ws.send(
           JSON.stringify({
-            point: point.id,
+            point: points[calibrationPointIndex].id,
             frame_number: f + 1,
             frame: captureCanvas.toDataURL("image/jpeg", 0.6),
           })
@@ -244,21 +223,67 @@ export default function VerifyPage() {
       await new Promise((r) => setTimeout(r, CAPTURE_INTERVAL_MS));
     }
     setCapturing(false);
-    // Incomplete capture (e.g. left fullscreen) — require a fresh recording.
+    // Incomplete capture — require a fresh recording.
     if (framesCaptured < FRAMES_PER_POINT) {
       setCapturedFrames(0);
     }
   }
 
+  // ── 3-2-1 countdown, then automatically capture ────────────────
+  const beginCapture = () => {
+    setCapturedFrames(0);
+    setCountdown(COUNTDOWN_SECONDS);
+    if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+    countdownTimerRef.current = setInterval(() => {
+      setCountdown((prev) => (prev === null ? null : prev - 1));
+    }, 1000);
+  };
+
+  const captureCurrentPointRef = useRef<() => Promise<void>>(async () => {});
+  useEffect(() => {
+    captureCurrentPointRef.current = captureCurrentPoint;
+  });
+
+  useEffect(() => {
+    if (countdown === null) return;
+    if (countdown <= 0) {
+      if (countdownTimerRef.current) {
+        clearInterval(countdownTimerRef.current);
+        countdownTimerRef.current = null;
+      }
+      captureCurrentPointRef.current();
+    }
+  }, [countdown]);
+
+  useEffect(() => {
+    return () => {
+      if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+    };
+  }, []);
+
+  const retryPoint = () => beginCapture();
+
+  const enterCalibrationFullscreen = async () => {
+    try {
+      await document.documentElement.requestFullscreen();
+    } catch (err) {
+      console.error("Fullscreen request failed:", err);
+    }
+  };
+
   function nextPoint() {
     const next = calibrationPointIndex + 1;
     if (next >= points.length) {
-      if (activeSet === "eye") {
-        setActiveSet("head");
+      if (phase === "calibration") {
+        // Eye calibration done → head calibration runs as a separate,
+        // normal (window-mode) screen, so leave fullscreen first.
+        document.exitFullscreen?.().catch(() => {});
+        setPhase("head");
         setPoints(HEAD_CALIBRATION_POINTS);
         setCalibrationPointIndex(0);
         setCapturedFrames(0);
       } else {
+        // Head calibration done → calibration complete.
         wsRef.current?.close();
         wsRef.current = null;
         if (mediaStreamRef.current) {
@@ -273,112 +298,115 @@ export default function VerifyPage() {
     }
   }
 
+  const restartCalibration = () => {
+    setPhase("calibration");
+    setPoints(EYE_CALIBRATION_POINTS);
+    setCalibrationPointIndex(0);
+    setCapturedFrames(0);
+    setCountdown(null);
+  };
+
+  // Restart the current phase from its FIRST point (not just the current one).
+  const restartPoints = () => {
+    if (capturing) return;
+    setPoints(phase === "head" ? HEAD_CALIBRATION_POINTS : EYE_CALIBRATION_POINTS);
+    setCalibrationPointIndex(0);
+    setCapturedFrames(0);
+    setCountdown(null);
+    if (countdownTimerRef.current) {
+      clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = null;
+    }
+  };
+
   const currentPoint = points[calibrationPointIndex] ?? null;
 
   // Total progress across both calibration stages (eye then head).
-  const calibrationTotal =
-    (activeSet === "head" ? 1 : 0) +
-    (calibrationPointIndex + capturedFrames / FRAMES_PER_POINT) / points.length;
-  const overallProgress = (calibrationTotal / 2) * 100;
+  const overallProgress =
+    phase === "head"
+      ? 50 + ((calibrationPointIndex + capturedFrames / FRAMES_PER_POINT) / points.length) * 50
+      : ((calibrationPointIndex + capturedFrames / FRAMES_PER_POINT) / points.length) * 50;
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
-      {/* ── Phase: verification checks ────────────────────────────── */}
-      {phase === "checks" && (
+      {/* ── Phase: exam rules & terms ────────────────────────────── */}
+      {phase === "rules" && (
         <>
-          <div>
-            <h2 className="text-2xl font-bold">Identity Verification</h2>
-            <p className="text-muted-foreground">
-              Complete all checks to unlock your examination portal
-            </p>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <div className="relative aspect-video bg-muted rounded-xl overflow-hidden border-2 border-border">
-              <div className="absolute inset-0 flex items-center justify-center">
-                <span className="material-symbols-outlined text-4xl text-muted-foreground">
-                  videocam
-                </span>
-              </div>
-              <div className="absolute inset-0 border-2 border-primary/30 rounded-lg pointer-events-none">
-                <div className="absolute top-1/4 left-1/4 right-1/4 bottom-1/4 border border-primary/50 rounded-xl">
-                  <div className="absolute -top-1 -left-1 w-4 h-4 border-t-2 border-l-2 border-primary" />
-                  <div className="absolute -top-1 -right-1 w-4 h-4 border-t-2 border-r-2 border-primary" />
-                  <div className="absolute -bottom-1 -left-1 w-4 h-4 border-b-2 border-l-2 border-primary" />
-                  <div className="absolute -bottom-1 -right-1 w-4 h-4 border-b-2 border-r-2 border-primary" />
-                </div>
-              </div>
-              <div className="absolute bottom-3 left-3 flex gap-2">
-                <div className="bg-background/90 backdrop-blur-sm px-2 py-1 rounded-full flex items-center gap-1 border border-border">
-                  <span className="w-2 h-2 bg-primary rounded-full animate-pulse" />
-                  <span className="text-xs">Camera OK</span>
-                </div>
-                <div className="bg-background/90 backdrop-blur-sm px-2 py-1 rounded-full flex items-center gap-1 border border-border">
-                  <span className="material-symbols-outlined text-xs text-primary">face</span>
-                  <span className="text-xs">Face Detected</span>
-                </div>
-              </div>
+          <div className="flex items-end justify-between">
+            <div>
+              <h2 className="text-xl font-bold">Exam Rules</h2>
+              <p className="text-sm text-muted-foreground">
+                Please read and agree before starting the exam.
+              </p>
             </div>
-            <p className="text-sm text-muted-foreground text-center italic">
-              Please ensure your face is clearly visible and centered in
-              the frame.
-            </p>
           </div>
 
-          <div className="bg-card border border-border rounded-xl p-6">
-            <h3 className="text-lg font-semibold mb-1">
-              Identity Verification
-            </h3>
-            <p className="text-sm text-muted-foreground mb-6">
-              Complete all checks to unlock your examination portal.
-            </p>
-
-            <div className="space-y-3 mb-6">
-              {checks.map((check) => (
+          <div className="bg-card border border-border rounded-xl p-5">
+            <div className="space-y-2.5">
+              {EXAM_RULES.map((rule) => (
                 <div
-                  key={check.id}
-                  className={`flex items-center justify-between p-3 rounded-lg border transition-all ${
-                    check.status === "complete"
-                      ? "bg-muted border-border"
-                      : check.status === "in_progress"
-                        ? "bg-primary/5 border-primary/20"
-                        : "bg-muted/50 border-border"
-                  }`}
+                  key={rule.title}
+                  className="flex items-start gap-2.5 p-3 rounded-lg border border-border/80 bg-muted/40"
                 >
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center text-primary">
-                      <span className="material-symbols-outlined">
-                        {check.icon}
-                      </span>
-                    </div>
-                    <div>
-                      <p className="text-sm font-medium">{check.label}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {check.description}
-                      </p>
-                    </div>
+                  <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center text-primary shrink-0">
+                    <span className="material-symbols-outlined text-lg">{rule.icon}</span>
                   </div>
-                  {check.status === "complete" && (
-                    <span className="material-symbols-outlined text-primary">
-                      check_circle
-                    </span>
-                  )}
-                  {check.status === "in_progress" && (
-                    <div className="w-5 h-5 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
-                  )}
-                  {check.status === "pending" && (
-                    <span className="material-symbols-outlined text-muted-foreground">
-                      radio_button_unchecked
-                    </span>
-                  )}
+                  <div className="min-w-0">
+                    <p className="text-[13px] font-semibold leading-tight">{rule.title}</p>
+                    <p className="text-xs text-muted-foreground leading-snug">
+                      {rule.detail}
+                    </p>
+                  </div>
                 </div>
               ))}
             </div>
+
+            <label
+              className={`flex items-center gap-3 mt-4 p-3.5 rounded-xl border cursor-pointer transition-all ${
+                agreeError
+                  ? "border-destructive/50 bg-destructive/5"
+                  : "border-border hover:bg-muted/40"
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={agreed}
+                onChange={(e) => {
+                  setAgreed(e.target.checked);
+                  setAgreeError(false);
+                }}
+                className="w-4 h-4 accent-primary shrink-0"
+              />
+              <span className="text-sm text-muted-foreground">
+                I have read and agree to the exam rules and terms. I understand
+                that violations are recorded and reviewed by the administrator.
+              </span>
+            </label>
+            {agreeError && (
+              <p className="mt-2 text-xs text-destructive flex items-center gap-1">
+                <span className="material-symbols-outlined text-sm">warning</span>
+                Please accept the rules before continuing.
+              </p>
+            )}
+
+            <button
+              onClick={() => {
+                if (!agreed) {
+                  setAgreeError(true);
+                  return;
+                }
+                setPhase("calibration");
+              }}
+              className="w-full mt-4 py-2.5 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold rounded-xl text-sm transition flex items-center justify-center gap-2"
+            >
+              <span className="material-symbols-outlined text-base">check_circle</span>
+              I Agree — Continue to Calibration
+            </button>
           </div>
         </>
       )}
 
-      {/* ── Phase: calibration ───────────────────────────────────── */}
+      {/* ── Phase: eye calibration (FULLSCREEN) ───────────────────── */}
       {phase === "calibration" && (
         <div className="fixed inset-0 z-[100] bg-slate-950/95 backdrop-blur-md flex flex-col items-center justify-between overflow-hidden p-6">
           <video
@@ -390,116 +418,291 @@ export default function VerifyPage() {
           />
           <div className="absolute inset-0 bg-gradient-to-b from-slate-950/80 via-transparent to-slate-950/90 pointer-events-none" />
 
-          {/* Fullscreen Gate — block calibration until fullscreen */}
-          {!isFullscreen && (
-            <div className="absolute inset-0 z-[60] bg-slate-950/95 backdrop-blur-md flex items-center justify-center p-6">
-              <div className="bg-slate-900 border border-slate-700/80 rounded-2xl p-8 max-w-sm w-full text-center space-y-4 shadow-2xl">
-                <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-400/30 flex items-center justify-center mx-auto text-cyan-400">
-                  <span className="material-symbols-outlined text-3xl">fullscreen</span>
-                </div>
-                <h3 className="text-white text-lg font-bold">Fullscreen Required</h3>
-                <p className="text-slate-400 text-sm leading-relaxed">
-                  Calibration must be performed in fullscreen mode. Enter fullscreen to continue.
-                </p>
-                <button
-                  onClick={enterFullscreen}
-                  className="w-full py-3 bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white font-semibold rounded-xl text-sm transition shadow-lg shadow-cyan-500/25 flex items-center justify-center gap-2"
-                >
-                  <span className="material-symbols-outlined text-base">fullscreen</span>
-                  Enter Fullscreen
-                </button>
+          {!isFullscreen ? (
+            <div className="relative z-30 flex flex-col items-center gap-5 text-center max-w-md my-auto">
+              <div className="w-16 h-16 rounded-2xl bg-blue-500/20 border border-blue-400/40 flex items-center justify-center">
+                <span className="material-symbols-outlined text-3xl text-blue-400">fullscreen</span>
               </div>
-            </div>
-          )}
-
-          {/* Floating Top Banner */}
-          <div className="relative z-20 bg-slate-900/90 backdrop-blur-xl border border-slate-800 rounded-full px-6 py-2.5 shadow-2xl flex items-center gap-3 text-white text-sm font-medium">
-            <span className="w-2.5 h-2.5 rounded-full bg-blue-500 animate-ping" />
-            {activeSet === "head" ? (
-              <span>
-                Head calibration — look <strong className="text-cyan-400 font-bold uppercase">{currentPoint?.label || ""}</strong> exactly as shown
-              </span>
-            ) : (
-              <span>Look directly at the <strong className="text-blue-400 font-bold capitalize">{currentPoint?.label || ""}</strong> point dot</span>
-            )}
-          </div>
-
-          {/* Calibration Target */}
-          {currentPoint?.image ? (
-            <div className="relative z-30 w-64 h-64 md:w-72 md:h-72 rounded-2xl overflow-hidden border-2 border-cyan-400/60 shadow-[0_0_40px_rgba(34,211,238,0.35)]">
-              {/* eslint-disable-next-line @next/next/no-img-element -- static calibration guide image from /public */}
-              <img
-                src={currentPoint.image}
-                alt={`Look ${currentPoint.label}`}
-                className="w-full h-full object-cover"
-              />
+              <div>
+                <h2 className="text-white text-xl font-bold">Eye Calibration Requires Fullscreen</h2>
+                <p className="text-slate-400 text-sm mt-2 leading-relaxed">
+                  Enter fullscreen mode so the calibration dots fill your screen
+                  and your eye movements can be tracked accurately.
+                </p>
+              </div>
+              <button
+                onClick={enterCalibrationFullscreen}
+                className="px-6 py-3 bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white font-semibold rounded-xl text-sm transition shadow-lg shadow-blue-500/25 flex items-center gap-2"
+              >
+                <span className="material-symbols-outlined text-base">fullscreen</span>
+                Enter Fullscreen &amp; Start Calibration
+              </button>
             </div>
           ) : (
-            currentPoint && (
-              <div
-                className="absolute z-30 transition-all duration-300 ease-out"
-                style={{
-                  left: `${currentPoint.x}%`,
-                  top: `${currentPoint.y}%`,
-                  transform: "translate(-50%, -50%)",
-                }}
-              >
-                <div className="relative flex items-center justify-center">
-                  {/* Outer glowing pulsing ring */}
-                  <div className="absolute -inset-4 rounded-full bg-blue-500/20 border-2 border-blue-500/80 animate-ping" />
-                  <div className="absolute -inset-2 rounded-full border border-cyan-400/60 animate-pulse" />
-                  {/* Center dot */}
-                  <div className="w-7 h-7 bg-gradient-to-tr from-blue-600 to-cyan-400 rounded-full shadow-[0_0_20px_rgba(56,189,248,0.8)] border-2 border-white flex items-center justify-center text-[10px] font-bold text-slate-950">
-                    {calibrationPointIndex + 1}
-                  </div>
+            <>
+              {/* Camera preview — centre-right, clear of the corner dots and toolbar */}
+              <div className="absolute right-6 top-1/2 -translate-y-1/2 z-30 w-40 sm:w-48 rounded-2xl overflow-hidden border-2 border-white/50 bg-slate-800 shadow-[0_0_30px_rgba(0,0,0,0.7)] pointer-events-none">
+                <video
+                  ref={pipRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="w-full aspect-video object-cover"
+                />
+                <div className="absolute inset-x-0 bottom-0 bg-black/60 backdrop-blur-sm px-2 py-1 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+                  <span className="text-[10px] font-semibold text-white">You (live)</span>
                 </div>
               </div>
-            )
-          )}
 
-          {/* Floating Bottom Control Toolbar */}
-          <div className="relative z-20 bg-slate-900/90 backdrop-blur-xl border border-slate-800 rounded-2xl p-4 shadow-2xl flex flex-col items-center gap-3 max-w-md w-full mb-2">
-            <div className="flex items-center justify-between w-full text-xs text-slate-400 px-1">
-              <span>{activeSet === "head" ? "Head" : "Eye"} calibration · Point {calibrationPointIndex + 1} of {points.length} ({currentPoint?.label})</span>
-              <span>{capturedFrames}/{FRAMES_PER_POINT} frames</span>
-            </div>
+              {/* Floating Top Banner */}
+              <div className="relative z-20 bg-slate-900/90 backdrop-blur-xl border border-slate-800 rounded-full px-6 py-2.5 shadow-2xl flex items-center gap-3 text-white text-sm font-medium">
+                <span className="w-2.5 h-2.5 rounded-full bg-blue-500 animate-ping" />
+                <span>Look directly at the <strong className="text-blue-400 font-bold capitalize">{currentPoint?.label || ""}</strong> point dot</span>
+              </div>
 
-            <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
-              <div
-                className="bg-gradient-to-r from-blue-500 to-cyan-400 h-full transition-all duration-200"
-                style={{
-                  width: `${overallProgress}%`,
-                }}
-              />
-            </div>
-
-            <div className="flex items-center gap-3 w-full pt-1">
-              {!capturing && capturedFrames === 0 && (
-                <button
-                  onClick={captureCurrentPoint}
-                  className="w-full py-2.5 bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white font-semibold rounded-xl text-sm transition shadow-lg shadow-blue-500/25 flex items-center justify-center gap-2"
+              {/* Calibration Target Dot */}
+              {currentPoint && (
+                <div
+                  className="absolute z-30 transition-all duration-300 ease-out"
+                  style={{
+                    left: `${currentPoint.x}%`,
+                    top: `${currentPoint.y}%`,
+                    transform: "translate(-50%, -50%)",
+                  }}
                 >
-                  <span className="material-symbols-outlined text-base">{activeSet === "head" ? "screen_search_desktop" : "center_focus_strong"}</span>
-                  {activeSet === "head" ? "Start Head Pose Capture" : "Start Capture Point"}
-                </button>
-              )}
-
-              {capturing && (
-                <div className="w-full py-2.5 bg-slate-800/80 border border-slate-700 text-white rounded-xl text-sm flex items-center justify-center gap-2">
-                  <div className="w-4 h-4 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin" />
-                  <span>Recording {activeSet === "head" ? "head pose" : "gaze"} data ({capturedFrames}/{FRAMES_PER_POINT})...</span>
+                  <div className="relative flex items-center justify-center">
+                    <div className="absolute -inset-4 rounded-full bg-blue-500/20 border-2 border-blue-500/80 animate-ping" />
+                    <div className="absolute -inset-2 rounded-full border border-cyan-400/60 animate-pulse" />
+                    <div className="w-7 h-7 bg-gradient-to-tr from-blue-600 to-cyan-400 rounded-full shadow-[0_0_20px_rgba(56,189,248,0.8)] border-2 border-white flex items-center justify-center text-[10px] font-bold text-slate-950">
+                      {calibrationPointIndex + 1}
+                    </div>
+                  </div>
                 </div>
               )}
 
-              {!capturing && capturedFrames > 0 && (
-                <button
-                  onClick={nextPoint}
-                  className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl text-sm transition shadow-lg shadow-emerald-600/25 flex items-center justify-center gap-2"
-                >
-                  <span>{activeSet === "eye" && calibrationPointIndex >= points.length - 1 ? "Start Head Calibration" : calibrationPointIndex >= points.length - 1 ? "Complete Calibration" : "Next Point"}</span>
-                  <span className="material-symbols-outlined text-base">arrow_forward</span>
-                </button>
+              {/* Countdown overlay */}
+              {countdown !== null && countdown > 0 && (
+                <div className="absolute inset-0 z-40 flex items-center justify-center pointer-events-none">
+                  <div className="flex flex-col items-center gap-2">
+                    <span className="text-slate-300 text-lg font-medium">Look at the point…</span>
+                    <span className="text-8xl font-black text-white drop-shadow-[0_0_30px_rgba(56,189,248,0.8)]">
+                      {countdown}
+                    </span>
+                  </div>
+                </div>
               )}
+
+              {/* Capture progress overlay (centre) */}
+              {capturing && (
+                <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-3 pointer-events-none">
+                  <div className="flex items-center gap-2.5 text-white font-bold text-lg">
+                    <div className="w-5 h-5 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin" />
+                    Recording gaze data ({capturedFrames}/{FRAMES_PER_POINT})...
+                  </div>
+                  <div className="w-64 bg-slate-800 rounded-full h-2 overflow-hidden">
+                    <div
+                      className="bg-gradient-to-r from-blue-500 to-cyan-400 h-full transition-all duration-200"
+                      style={{ width: `${(capturedFrames / FRAMES_PER_POINT) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Done overlay (centre) */}
+              {!capturing && (countdown === null || countdown <= 0) && capturedFrames >= FRAMES_PER_POINT && (
+                <div className="absolute inset-0 z-40 flex items-center justify-center pointer-events-none">
+                  <div className="bg-emerald-600/20 border border-emerald-400/40 text-emerald-400 rounded-2xl px-8 py-4 font-bold text-lg flex items-center gap-2.5 shadow-2xl">
+                    <span className="material-symbols-outlined text-2xl">check_circle</span>
+                    Done — Point captured successfully
+                  </div>
+                </div>
+              )}
+
+              {/* Floating Bottom Control Toolbar */}
+              <div className="relative z-20 bg-slate-900/90 backdrop-blur-xl border border-slate-800 rounded-2xl p-4 shadow-2xl flex flex-col items-center gap-3 max-w-md w-full mb-2">
+                <div className="flex items-center justify-between w-full text-xs text-slate-400 px-1">
+                  <span>Eye calibration · Point {calibrationPointIndex + 1} of {points.length} ({currentPoint?.label})</span>
+                  <div className="flex items-center gap-3">
+                    <span>{capturedFrames}/{FRAMES_PER_POINT} frames</span>
+                    <button
+                      onClick={restartPoints}
+                      className="text-slate-400 hover:text-white flex items-center gap-1 transition"
+                    >
+                      <span className="material-symbols-outlined text-sm">replay</span>
+                      Restart
+                    </button>
+                  </div>
+                </div>
+
+                <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                  <div
+                    className="bg-gradient-to-r from-blue-500 to-cyan-400 h-full transition-all duration-200"
+                    style={{
+                      width: `${overallProgress}%`,
+                    }}
+                  />
+                </div>
+
+                <div className="flex items-center gap-3 w-full pt-1">
+                  {countdown !== null && countdown > 0 ? (
+                    <div className="w-full py-2.5 bg-blue-600/80 border border-blue-400/40 text-white rounded-xl text-sm font-bold flex items-center justify-center gap-2">
+                      <span className="material-symbols-outlined text-base">visibility</span>
+                      Look at the point — capturing in {countdown}…
+                    </div>
+                  ) : capturing ? (
+                    <div className="w-full py-2.5 text-center text-xs text-slate-400">
+                      Capturing in progress…
+                    </div>
+                  ) : capturedFrames >= FRAMES_PER_POINT ? (
+                    <>
+                      <button
+                        onClick={retryPoint}
+                        className="flex-1 py-2.5 bg-slate-700/80 hover:bg-slate-600/80 border border-slate-600 text-white font-semibold rounded-xl text-sm transition flex items-center justify-center gap-2"
+                      >
+                        <span className="material-symbols-outlined text-base">replay</span>
+                        Retry
+                      </button>
+                      <button
+                        onClick={nextPoint}
+                        className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl text-sm transition shadow-lg shadow-emerald-600/25 flex items-center justify-center gap-2"
+                      >
+                        <span>{calibrationPointIndex >= points.length - 1 ? "Start Head Calibration" : "Next Point"}</span>
+                        <span className="material-symbols-outlined text-base">arrow_forward</span>
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      onClick={beginCapture}
+                      className="w-full py-2.5 bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white font-semibold rounded-xl text-sm transition shadow-lg shadow-blue-500/25 flex items-center justify-center gap-2"
+                    >
+                      <span className="material-symbols-outlined text-base">center_focus_strong</span>
+                      Start Capture Point
+                    </button>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── Phase: head calibration (separate window-mode screen) ── */}
+      {phase === "head" && (
+        <div className="bg-card border border-border rounded-xl p-6 sm:p-8 space-y-6">
+          <div>
+            <h2 className="text-2xl font-bold">Head Calibration</h2>
+            <p className="text-muted-foreground">
+              Look like the image shown, then capture.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {/* Reference image with description */}
+            <div className="space-y-3">
+              <div className="rounded-2xl overflow-hidden border-2 border-cyan-400/60 shadow-[0_0_30px_rgba(34,211,238,0.2)] bg-slate-100">
+                {/* eslint-disable-next-line @next/next/no-img-element -- static calibration guide image from /public */}
+                <img
+                  src={currentPoint?.image}
+                  alt={`Look ${currentPoint?.label}`}
+                  className="w-full aspect-video object-cover"
+                />
+              </div>
+              <div className="rounded-xl bg-cyan-50 border border-cyan-200 px-4 py-3 text-center">
+                <p className="text-sm font-bold text-cyan-800">
+                  {currentPoint?.label} — {currentPoint?.description}
+                </p>
+              </div>
+            </div>
+
+            {/* Live camera preview + controls */}
+            <div className="space-y-3">
+              <div className="relative rounded-2xl overflow-hidden border border-border bg-slate-900 aspect-video">
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="w-full h-full object-cover"
+                />
+                <span className="absolute top-2 left-2 text-[11px] font-medium text-white/80 bg-black/50 rounded-full px-2 py-0.5">
+                  You (live)
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
+                <span>Point {calibrationPointIndex + 1} of {points.length} — {currentPoint?.label}</span>
+                <div className="flex items-center gap-3">
+                  <span>{capturedFrames}/{FRAMES_PER_POINT} frames</span>
+                  <button
+                    onClick={restartPoints}
+                    className="flex items-center gap-1 text-muted-foreground hover:text-foreground transition"
+                  >
+                    <span className="material-symbols-outlined text-sm">replay</span>
+                    Restart
+                  </button>
+                </div>
+              </div>
+
+              <div className="w-full bg-muted rounded-full h-1.5 overflow-hidden">
+                <div
+                  className="bg-gradient-to-r from-blue-500 to-cyan-400 h-full transition-all duration-200"
+                  style={{ width: `${overallProgress}%` }}
+                />
+              </div>
+
+              <div className="pt-1 space-y-3">
+                {countdown !== null && countdown > 0 ? (
+                  <div className="w-full py-2.5 bg-blue-600 text-white rounded-xl text-sm font-bold flex items-center justify-center gap-2">
+                    <span className="material-symbols-outlined text-base">visibility</span>
+                    Look like the image — capturing in {countdown}…
+                  </div>
+                ) : capturing ? (
+                  <div className="w-full py-3 bg-slate-50 border border-border rounded-xl flex flex-col items-center justify-center gap-2.5">
+                    <div className="flex items-center justify-center gap-2 text-sm font-semibold text-slate-700">
+                      <div className="w-4 h-4 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin" />
+                      <span>Recording head pose ({capturedFrames}/{FRAMES_PER_POINT})...</span>
+                    </div>
+                    <div className="w-64 bg-muted rounded-full h-2 overflow-hidden">
+                      <div
+                        className="bg-gradient-to-r from-blue-500 to-cyan-400 h-full transition-all duration-200"
+                        style={{ width: `${(capturedFrames / FRAMES_PER_POINT) * 100}%` }}
+                      />
+                    </div>
+                  </div>
+                ) : capturedFrames >= FRAMES_PER_POINT ? (
+                  <>
+                    <div className="w-full py-3 bg-emerald-100 border border-emerald-300 text-emerald-700 rounded-xl text-sm font-bold flex items-center justify-center gap-2">
+                      <span className="material-symbols-outlined text-base">check_circle</span>
+                      Done — Point captured successfully
+                    </div>
+                    <div className="flex items-center gap-3 w-full">
+                      <button
+                        onClick={retryPoint}
+                        className="flex-1 py-2.5 bg-slate-200 hover:bg-slate-300 text-slate-800 font-semibold rounded-xl text-sm transition flex items-center justify-center gap-2"
+                      >
+                        <span className="material-symbols-outlined text-base">replay</span>
+                        Retry
+                      </button>
+                      <button
+                        onClick={nextPoint}
+                        className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl text-sm transition shadow-lg shadow-emerald-600/25 flex items-center justify-center gap-2"
+                      >
+                        <span>{calibrationPointIndex >= points.length - 1 ? "Complete Calibration" : "Next Point"}</span>
+                        <span className="material-symbols-outlined text-base">arrow_forward</span>
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <button
+                    onClick={beginCapture}
+                    className="w-full py-2.5 bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white font-semibold rounded-xl text-sm transition shadow-lg shadow-blue-500/25 flex items-center justify-center gap-2"
+                  >
+                    <span className="material-symbols-outlined text-base">screen_search_desktop</span>
+                    Start Head Pose Capture
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -539,6 +742,16 @@ export default function VerifyPage() {
                 if (!session || starting) return;
                 setStarting(true);
                 try {
+                  // Enter fullscreen from within this user gesture — Chrome
+                  // rejects requestFullscreen() outside a gesture, and the
+                  // exam page mounts already in fullscreen after navigation.
+                  if (!document.fullscreenElement) {
+                    try {
+                      await document.documentElement.requestFullscreen();
+                    } catch (err) {
+                      console.error("Fullscreen request failed:", err);
+                    }
+                  }
                   await api.startSession(session.id);
                   router.push(`/student/exams/${params.id}`);
                 } catch (err: any) {
@@ -552,12 +765,13 @@ export default function VerifyPage() {
                 arrow_forward
               </span>
             </Button>
-            <p className="text-xs text-muted-foreground text-center flex items-center justify-center gap-1 mt-2">
-              <span className="material-symbols-outlined text-sm">
-                lock
-              </span>
-              Encrypted Connection
-            </p>
+            <Button
+              className="w-full mt-3"
+              onClick={restartCalibration}
+            >
+              <span className="material-symbols-outlined mr-2">replay</span>
+              Recalibrate
+            </Button>
           </div>
         </>
       )}

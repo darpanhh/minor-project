@@ -4,13 +4,16 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { api } from "@/src/services/api";
 import ProtectedRoute from "@/src/components/ProtectedRoute";
+import { useAuth } from "@/src/contexts/AuthContext";
 
 export default function StudentExamsPage() {
+  const { user } = useAuth();
   const [exams, setExams] = useState<any[]>([]);
   const [sessions, setSessions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (!user) return;
     Promise.all([api.myExams(), api.mySessions()])
       .then(([e, s]) => {
         setExams(e);
@@ -18,7 +21,7 @@ export default function StudentExamsPage() {
       })
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, []);
+  }, [user]);
 
   function getSessionForExam(examId: string) {
     return sessions.find((s) => s.exam_id === examId);
