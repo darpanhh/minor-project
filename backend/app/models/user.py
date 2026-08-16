@@ -1,10 +1,13 @@
 import uuid
 import enum
-from datetime import datetime
-from sqlalchemy import String, Enum, DateTime, Float, func
+from datetime import datetime, timezone
+from sqlalchemy import Column, String, Enum, DateTime, Float, func
 from sqlalchemy.dialects.postgresql import UUID, ARRAY
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-from app.core.database import Base
+from sqlmodel import SQLModel, Field, Relationship
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class UserRole(str, enum.Enum):
@@ -12,26 +15,30 @@ class UserRole(str, enum.Enum):
     admin = "admin"
 
 
-class User(Base):
+class User(SQLModel, table=True):
     __tablename__ = "users"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    full_name: str = Field(sa_column=Column(String(255), nullable=False))
+    email: str = Field(sa_column=Column(String(255), unique=True, nullable=False, index=True))
+    password_hash: str = Field(sa_column=Column(String(255), nullable=False))
+    created_at: datetime = Field(
+        default_factory=_utcnow,
+        sa_column=Column(DateTime(timezone=True), server_default=func.now()),
     )
-    full_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    role: Mapped[UserRole] = mapped_column(
-        Enum(UserRole), default=UserRole.student, nullable=False
+    role: UserRole = Field(
+        default=UserRole.student,
+        sa_column=Column(Enum(UserRole), default=UserRole.student, nullable=False),
     )
-    registered_photo: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    face_embedding: Mapped[list[float] | None] = mapped_column(
-        ARRAY(Float), nullable=True
+    registered_photo: str | None = Field(default=None, sa_column=Column(String(500), nullable=True))
+    face_embedding: list[float] | None = Field(
+        default=None,
+        sa_column=Column(ARRAY(Float), nullable=True),
     )
-    student_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+    student_id: str | None = Field(default=None, sa_column=Column(String(100), nullable=True))
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        sa_column=Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4),
     )
 
-    exams_created = relationship("Exam", back_populates="creator")
-    exam_sessions = relationship("ExamSession", back_populates="student")
+    exams_created: list["Exam"] = Relationship(back_populates="creator")
+    exam_sessions: list["ExamSession"] = Relationship(back_populates="student")

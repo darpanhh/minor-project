@@ -1,10 +1,10 @@
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException
+from sqlmodel import Session
 from app.core.database import get_db
-from app.auth.dependencies import get_current_user, require_role
+from app.auth.dependencies import require_role
 from app.models.user import User, UserRole
-from app.models.exam import Exam, ExamSession, SessionStatus
+from app.models.exam import Exam, ExamSession
 from app.schemas.exam_schema import ExamOut, ExamSessionOut
 
 router = APIRouter(prefix="/api/my", tags=["student"])
@@ -15,11 +15,6 @@ def my_available_exams(
     db: Session = Depends(get_db),
     student: User = Depends(require_role(UserRole.student)),
 ):
-    registered_ids = [
-        r.exam_id for r in db.query(ExamSession.exam_id).filter(
-            ExamSession.student_id == student.id
-        ).all()
-    ]
     exams = db.query(Exam).order_by(Exam.start_time.desc()).all()
     return exams
 

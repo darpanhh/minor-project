@@ -12,24 +12,23 @@ import logging
 import os
 import time
 import uuid
-from collections import deque
 from datetime import datetime
 
 import cv2
 import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
-from sqlalchemy.orm import Session as DBSession
+from sqlmodel import Session as DBSession
 
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.auth.jwt_handler import verify_token
 from app.models.exam import ExamSession
 from app.models.event import ProctoringEvent, EventType
+from app.models.calibration import Calibration
 from app.proctoring.detector import ProctorDetector
 
 from app.proctoring.gaze.calibration import CalibrationProcessor
 from app.proctoring.gaze.gaze_service import GazeService
-from app.models.calibration import Calibration
 
 calibration_processor = CalibrationProcessor()
 
@@ -66,6 +65,8 @@ ALERT_TO_EVENT_TYPE: dict[str, EventType] = {
     "multiple_persons": EventType.multiple_faces,
     "phone_detected": EventType.phone_detected,
     "person_absent": EventType.person_absent,
+    "gaze_away": EventType.gaze_away,
+    "head_turn": EventType.head_pose_abnormal,
 }
 
 # ── Temporal violation state machine (all timers use monotonic time) ─
@@ -73,31 +74,97 @@ ABSENCE_GRACE = 5.0
 MULTIPLE_PERSON_GRACE = 1.5
 PHONE_GRACE = 2.0
 VIOLATION_END_GRACE = 5.0
-SNAPSHOT_COOLDOWN = 10.0
+# Per-event-type snapshot cooldown: for a GIVEN violation type, never take
+# two snapshots within 5 seconds. The cooldown is independent per event type —
+# a phone snapshot does NOT block a gaze snapshot, and a gaze snapshot does
+# NOT block a head snapshot, so every detection type gets its own evidence.
+SNAPSHOT_COOLDOWN = 5.0
 
 # Seconds a person must be continuously undetected before person_absent
 # counts as active (guards against single-frame YOLO detection flicker).
 PERSON_ABSENT_DEBOUNCE = 2.0
 
+# Per-session, per-reason timestamps (monotonic) of the last evidence snapshot,
+# kept at MODULE level so each type's gate survives websocket reconnects — a
+# reconnect must never allow a re-snapshot within that type's cooldown window.
+_snapshot_store: dict[str, dict[str, float]] = {}
+_MAX_STORED_SESSIONS = 100
+
+
+def _record_snapshot(session_key: str, reason: str, now_mono: float) -> None:
+    """Store the snapshot timestamp for a session+reason, bounding the map size."""
+    timers = _snapshot_store.get(session_key)
+    if timers is None:
+        if len(_snapshot_store) >= _MAX_STORED_SESSIONS:
+            try:
+                del _snapshot_store[next(iter(_snapshot_store))]
+            except (StopIteration, KeyError):
+                pass
+        timers = {}
+        _snapshot_store[session_key] = timers
+    timers[reason] = now_mono
+
+
+def _can_snapshot(session_key: str, reason: str, now_mono: float) -> bool:
+    """Atomic per-session/per-reason snapshot gate — the single source of truth.
+
+    Checks whether `reason` (for `session_key`) may snapshot RIGHT NOW and, if
+    so, IMMEDIATELY reserves the slot by recording `now_mono` here — BEFORE the
+    caller performs the (disk-I/O) snapshot operation. No re-entry or sibling
+    code path can pass the same gate within SNAPSHOT_COOLDOWN seconds, because
+    the reservation already happened. A rejected check does NOT touch the
+    stored timestamp. The store is module-level and keyed by session UUID, so
+    a websocket reconnect for the same session reuses the same timers.
+    """
+    timers = _snapshot_store.get(session_key)
+    last = timers.get(reason) if timers else None
+    if last is not None and now_mono - last < SNAPSHOT_COOLDOWN:
+        logger.debug(
+            "Snapshot REJECTED: session=%s reason=%s last=%.3f now=%.3f "
+            "elapsed=%.3fs (<%0.1fs)",
+            session_key, reason, last, now_mono, now_mono - last,
+            SNAPSHOT_COOLDOWN,
+        )
+        return False
+
+    _record_snapshot(session_key, reason, now_mono)
+    logger.debug(
+        "Snapshot ALLOWED: session=%s reason=%s last=%s now=%.3f elapsed=%s",
+        session_key, reason,
+        f"{last:.3f}" if last is not None else "None",
+        now_mono,
+        f"{now_mono - last:.3f}s" if last is not None else "n/a",
+    )
+    return True
+
 GRACE_PERIODS: dict[str, float] = {
     "phone_detected": PHONE_GRACE,
     "multiple_persons": MULTIPLE_PERSON_GRACE,
     "person_absent": ABSENCE_GRACE,
+    "gaze_away": 3.0,
+    "head_turn": 3.0,
 }
 
 WARNING_MESSAGES: dict[str, str] = {
     "phone_detected": "WARNING: Mobile phone detected. Please put away all devices.",
     "multiple_persons": "WARNING: Multiple persons detected in frame. Please ensure you are alone.",
     "person_absent": "WARNING: No person detected in frame. Please ensure you are visible to the camera.",
+    "gaze_away": "WARNING: Gaze away from screen detected. Please keep your eyes on the exam.",
+    "head_turn": "WARNING: Head turned away from screen. Please face your screen.",
 }
 
 VIOLATION_MESSAGES: dict[str, str] = {
     "phone_detected": "VIOLATION RECORDED: Mobile phone detected. This has been reported to the administrator.",
     "multiple_persons": "VIOLATION RECORDED: Multiple persons detected in frame. This has been reported to the administrator.",
     "person_absent": "VIOLATION RECORDED: No person detected in frame. This has been reported to the administrator.",
+    "gaze_away": "VIOLATION RECORDED: Gaze away from screen detected. This has been reported to the administrator.",
+    "head_turn": "VIOLATION RECORDED: Head turned away from screen. This has been reported to the administrator.",
 }
 
-VIOLATION_REASONS = ("phone_detected", "multiple_persons", "person_absent")
+VIOLATION_REASONS = (
+    "phone_detected", "multiple_persons", "person_absent",
+    "gaze_away", "head_turn",
+)
 
 
 def _new_violation_state() -> dict:
@@ -145,40 +212,6 @@ def _save_snapshot(session_id: str, frame: np.ndarray, reason: str) -> str:
     return fname
 
 
-# Rolling frame history so a snapshot can be taken from the frame at the time a
-# violation STARTED (e.g. the actual gaze-away moment), not from the current
-# frame several seconds later when the student has already looked back.
-FRAME_BUFFER_MAXLEN = 15  # ~15s of history at the ~1 fps frame rate
-
-
-def _snapshot_frame_for_time(
-    frame_buffer: deque,
-    start_ts: float,
-    fallback_frame: np.ndarray,
-) -> np.ndarray:
-    """Return the first buffered frame recorded at/after `start_ts`.
-
-    Falls back to `fallback_frame` (the current frame) if nothing is available.
-    """
-    for ts, b64 in frame_buffer:
-        if ts >= start_ts:
-            decoded = _decode_frame(b64)
-            if decoded is not None:
-                return decoded
-    return fallback_frame
-
-
-def _object_violation_active(result: dict) -> bool:
-    """True if a phone / multiple-persons violation is in the CURRENT frame.
-
-    Only suppress gaze-away/looking-down when an object violation is actually
-    visible right now (a phone in hand is primarily a phone violation). Gaze
-    events are NOT suppressed by historical/lingering object states, so genuine
-    gaze-away snapshots are always taken.
-    """
-    return bool(result.get("phone_detected")) or (result.get("person_count") or 0) > 1
-
-
 def _persist_event(
     db: DBSession,
     session_id: uuid.UUID,
@@ -205,7 +238,7 @@ def _persist_event(
 
 
 def _load_calibration(gaze_service: GazeService, session_uuid: uuid.UUID) -> None:
-    """Load calibration profile from DB into the gaze service (best-effort)."""
+    """Load the session's calibration profile into the gaze service (best-effort)."""
     try:
         db = SessionLocal()
         try:
@@ -216,7 +249,9 @@ def _load_calibration(gaze_service: GazeService, session_uuid: uuid.UUID) -> Non
                 gaze_service.load_calibration(cal.profile)
                 logger.info("Gaze: loaded calibration for session %s", session_uuid)
             else:
-                logger.info("Gaze: no calibration profile for session %s (ok)", session_uuid)
+                logger.info(
+                    "Gaze: no completed calibration profile for session %s "
+                    "(falling back to uncalibrated yaw thresholds)", session_uuid)
         finally:
             db.close()
     except Exception as e:
@@ -294,12 +329,13 @@ async def proctor_ws(
 
     # Per-reason temporal state machine for warning-first violation logic
     violation_states: dict[str, dict] = {r: _new_violation_state() for r in VIOLATION_REASONS}
-    last_snapshot_at: float | None = None  # monotonic timestamp of the last evidence snapshot
+    # Per-session, per-reason snapshot cooldown, stored at MODULE level so it
+    # survives websocket reconnects: for any given event type, never two
+    # snapshots within SNAPSHOT_COOLDOWN seconds; each type is gated
+    # independently so gaze/head/phone never block each other.
+    last_snapshot_key = str(session_uuid)
 
-    # Recent frames (timestamp, base64) used to snapshot the violation-start moment
-    frame_buffer: deque[tuple[float, str]] = deque(maxlen=FRAME_BUFFER_MAXLEN)
-
-    # Initialise gaze/head tracking with this session's calibration
+    # ── Initialise gaze/head tracking with this session's calibration ──
     gaze_service = GazeService()
     _load_calibration(gaze_service, session_uuid)
 
@@ -314,10 +350,6 @@ async def proctor_ws(
                 frame = _decode_frame(frame_data)
                 if frame is None:
                     continue
-
-                # Record this frame in the rolling history (before processing,
-                # so its timestamp aligns with the "now" used for violations).
-                frame_buffer.append((datetime.now().timestamp(), frame_data))
             except json.JSONDecodeError:
                 logger.warning("Proctor WS: received invalid JSON from session %s", session_uuid)
                 continue
@@ -358,6 +390,16 @@ async def proctor_ws(
                 >= PERSON_ABSENT_DEBOUNCE
             ):
                 current_reasons.add("person_absent")
+
+            # ── Gaze/head current-frame violations (MediaPipe, yaw-only) ──
+            # These feed the SAME warning → violation state machine as the
+            # object-detection reasons, keeping behaviour/messaging consistent.
+            # Each event type is detected independently — a phone / multiple-
+            # person episode does NOT suppress gaze/head classification.
+            gaze_violations = set(gaze_result.get("active_violations") or [])
+            for gaze_vtype, reason in (("GAZE_AWAY", "gaze_away"), ("HEAD_TURN", "head_turn")):
+                if gaze_vtype in gaze_violations:
+                    current_reasons.add(reason)
 
             now_mono = time.monotonic()
             new_alerts: list[dict] = []
@@ -418,26 +460,29 @@ async def proctor_ws(
                         "level": "violation",
                     })
 
-            # ── Confirmations: ONE event per reason per episode, ONE snapshot
-            #    for the same confirmation moment (shared across simultaneous
-            #    violations), subject to the snapshot cooldown ──────────────
+            # ── Confirmations: ONE event per reason per episode. Each confirmed
+            #    reason is snapshotted independently, gated by its OWN
+            #    SNAPSHOT_COOLDOWN — a reason still cooling down still gets its
+            #    event, just without a snapshot. ──────────────────────────────
             snapshots: list[str] = []
             if newly_confirmed:
                 db = SessionLocal()
                 try:
-                    snapshot_url = None
-                    if last_snapshot_at is None or now_mono - last_snapshot_at >= SNAPSHOT_COOLDOWN:
-                        fname = _save_snapshot(str(session_uuid), frame, "+".join(newly_confirmed))
-                        snapshot_url = f"/snapshots/{fname}"
-                        snapshots.append(snapshot_url)
-                        last_snapshot_at = now_mono
-
                     for reason in newly_confirmed:
+                        snapshot_url = None
+                        if _can_snapshot(last_snapshot_key, reason, now_mono):
+                            fname = _save_snapshot(str(session_uuid), frame, reason)
+                            snapshot_url = f"/snapshots/{fname}"
+                            snapshots.append(snapshot_url)
+
                         try:
                             etype = ALERT_TO_EVENT_TYPE.get(reason)
                             if not etype:
                                 continue
-                            conf = _detection_confidence(detector, result, reason)
+                            if reason in ("gaze_away", "head_turn"):
+                                conf = float(gaze_result.get("confidence") or 0.5)
+                            else:
+                                conf = _detection_confidence(detector, result, reason)
                             event = _persist_event(db, session_uuid, etype, conf, snapshot_url)
                             violation_states[reason]["event_id"] = event.id if event else None
                             logger.info(
@@ -452,20 +497,25 @@ async def proctor_ws(
                 finally:
                     db.close()
 
-            # ── Cooldown only gates REPEATED evidence snapshots: while a
-            #    confirmed violation stays active, refresh its snapshot every
-            #    10s WITHOUT creating new DB events ────────────────────────
+            # ── Refresh evidence snapshots (no new DB events) for violations
+            #    that are STILL actively visible in the CURRENT frame — never
+            #    during "recovering", when the offender has already left the
+            #    frame. This keeps every snapshot showing the actual violation
+            #    (e.g. the phone is always in a phone snapshot). Each reason is
+            #    gated by its OWN cooldown. ───────────────────────────────────
             refresh_reasons = [
-                r for r, s in violation_states.items() if s["phase"] in ("confirmed", "recovering")
+                r for r, s in violation_states.items()
+                if s["phase"] == "confirmed" and r in current_reasons
             ]
-            if refresh_reasons and (last_snapshot_at is None or now_mono - last_snapshot_at >= SNAPSHOT_COOLDOWN):
+            if refresh_reasons:
                 db = SessionLocal()
                 try:
-                    fname = _save_snapshot(str(session_uuid), frame, "+".join(refresh_reasons))
-                    snapshot_url = f"/snapshots/{fname}"
-                    snapshots.append(snapshot_url)
-                    last_snapshot_at = now_mono
-                    for reason in refresh_reasons:
+                    for reason in sorted(refresh_reasons):
+                        if not _can_snapshot(last_snapshot_key, reason, now_mono):
+                            continue
+                        fname = _save_snapshot(str(session_uuid), frame, reason)
+                        snapshot_url = f"/snapshots/{fname}"
+                        snapshots.append(snapshot_url)
                         event_id = violation_states[reason].get("event_id")
                         if not event_id:
                             continue
@@ -473,7 +523,10 @@ async def proctor_ws(
                         if event:
                             event.snapshot_path = snapshot_url
                     db.commit()
-                    logger.info("Refreshed evidence snapshot for active violations: %s", refresh_reasons)
+                    logger.debug(
+                        "Refreshed evidence snapshots for active violations: %s",
+                        refresh_reasons,
+                    )
                 finally:
                     db.close()
 
@@ -481,42 +534,6 @@ async def proctor_ws(
             result["active_warnings"] = active_warnings
             result["snapshots"] = snapshots
             result["snapshot_reasons"] = newly_confirmed
-
-            # ── Persist gaze/head events (completely additive) ──────────
-            gaze_events = gaze_service.get_pending_events()
-            if gaze_events:
-                db_gaze = SessionLocal()
-                try:
-                    # A primary object violation (phone / multiple persons) in the
-                    # CURRENT frame overrides GAZE_AWAY / LOOKING_DOWN: looking at
-                    # a phone naturally produces those, so they must not be
-                    # recorded as separate (mislabeled) "gaze away" events.
-                    for ev in gaze_events:
-                        if ev["violation_type"] in ("GAZE_AWAY", "LOOKING_DOWN") and _object_violation_active(result):
-                            logger.info("Suppressing gaze event %s while object visible", ev["violation_type"])
-                            continue
-
-                        # Snapshot the frame from when the violation actually
-                        # started (e.g. the moment the student looked away),
-                        # not the current frame after they may have looked back.
-                        snap_frame = _snapshot_frame_for_time(
-                            frame_buffer,
-                            ev.get("start_time", time.time()),
-                            frame,
-                        )
-                        fname = _save_snapshot(str(session_uuid), snap_frame, ev["violation_type"])
-                        snapshot_url = f"/snapshots/{fname}"
-                        _persist_event(db_gaze, session_uuid, ev["event_type"], ev["confidence"], snapshot_url)
-                        logger.info(
-                            "Gaze event: %s (conf=%.2f dur=%.1fs snapshot=%s)",
-                            ev["violation_type"], ev["confidence"], ev["duration"], fname,
-                        )
-                        result.setdefault("alerts", []).append({
-                            "type": ev["violation_type"],
-                            "message": f"VIOLATION RECORDED: {ev['violation_type'].replace('_', ' ').title()} detected for {ev['duration']:.0f}s.",
-                        })
-                finally:
-                    db_gaze.close()
 
             result["gaze"] = gaze_result
             await websocket.send_json(result)

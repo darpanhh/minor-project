@@ -27,8 +27,6 @@ interface GazeData {
   predicted_point: string | null;
   confidence: number;
   yaw: number | null;
-  pitch: number | null;
-  roll: number | null;
   violation_active: boolean;
   violation_type: string | null;
   violation_duration: number;
@@ -135,8 +133,7 @@ export default function ProctoringMonitor({
       // ── Status badge (top-right) ─────────────────────────────
       {
         const statusColor =
-          gaze.status === "normal" ? "#22c55e" :
-          gaze.status === "looking_off_screen" ? "#6b7280" : "#ef4444";
+          gaze.status === "normal" ? "#22c55e" : "#ef4444";
         ctx.fillStyle = statusColor;
         ctx.globalAlpha = 0.85;
         ctx.fillRect(cw - 170, 8, 162, 26);
@@ -153,10 +150,10 @@ export default function ProctoringMonitor({
       ctx.ellipse(cx, cy, cw * 0.14, ch * 0.30, 0, 0, Math.PI * 2);
       ctx.stroke();
 
-      // ── Gaze direction arrow + dot ───────────────────────────
-      if (gaze.yaw !== null && gaze.pitch !== null) {
+      // ── Gaze direction arrow + dot (head signs are yaw-only) ──
+      if (gaze.yaw !== null) {
         const displayYaw = -gaze.yaw;
-        const displayPitch = -gaze.pitch;
+        const displayPitch = 0;
         const scale = Math.max(cw, ch) / 100;
         const gx = cx + displayYaw * scale;
         const gy = cy + displayPitch * scale;
@@ -233,22 +230,19 @@ export default function ProctoringMonitor({
         ctx.fillText(`${(gaze.confidence * 100).toFixed(0)}%`, barX + barW + 6, barY + 6);
       }
 
-      // ── Angle readout (bottom-left corner) ───────────────────
-      if (gaze.yaw !== null && gaze.pitch !== null) {
+      // ── Angle readout (bottom-left corner) — yaw only ───────
+      if (gaze.yaw !== null) {
         ctx.fillStyle = "rgba(255,255,255,0.70)";
         const yOff = ch - 60;
 
         const hDir = gaze.yaw > 12 ? "← LEFT" : gaze.yaw < -12 ? "RIGHT →" : "CENTER";
-        const vDir = gaze.pitch > 12 ? "↑ UP" : gaze.pitch < -12 ? "↓ DOWN" : "—";
         ctx.font = "bold 13px sans-serif";
-        ctx.fillText(`${hDir}  ${vDir}`, 10, yOff);
+        ctx.fillText(hDir, 10, yOff);
 
         ctx.font = "11px monospace";
         ctx.fillStyle = "rgba(255,255,255,0.50)";
         ctx.fillText(
-          `yaw ${gaze.yaw >= 0 ? "+" : ""}${gaze.yaw.toFixed(0)}°  ` +
-          `pitch ${gaze.pitch >= 0 ? "+" : ""}${gaze.pitch.toFixed(0)}°  ` +
-          `roll ${gaze.roll !== null ? (gaze.roll >= 0 ? "+" : "") + gaze.roll.toFixed(0) : "?"}°`,
+          `yaw ${gaze.yaw >= 0 ? "+" : ""}${gaze.yaw.toFixed(0)}°`,
           10, yOff + 16,
         );
       }
@@ -365,11 +359,9 @@ export default function ProctoringMonitor({
           if (result.gaze) {
             gazeRef.current = result.gaze;
             setGazeStatus(result.gaze.status);
-            if (result.gaze.yaw !== null && result.gaze.pitch !== null) {
+            if (result.gaze.yaw !== null) {
               setGazeAngles(
-                `Y${result.gaze.yaw >= 0 ? "+" : ""}${result.gaze.yaw.toFixed(0)} ` +
-                `P${result.gaze.pitch >= 0 ? "+" : ""}${result.gaze.pitch.toFixed(0)} ` +
-                `R${result.gaze.roll !== null ? (result.gaze.roll >= 0 ? "+" : "") + result.gaze.roll.toFixed(0) : "?"}`
+                `Y${result.gaze.yaw >= 0 ? "+" : ""}${result.gaze.yaw.toFixed(0)}`
               );
             } else {
               setGazeAngles("");
@@ -525,8 +517,7 @@ export default function ProctoringMonitor({
                 <>
                   <span className="flex items-center gap-1">
                     <span className={`inline-block w-2 h-2 rounded-full ${
-                      isNormal ? "bg-green-500" :
-                      gazeStatus === "looking_off_screen" ? "bg-gray-500" : "bg-red-500"
+                      isNormal ? "bg-green-500" : "bg-red-500"
                     }`} />
                     <span className={isNormal ? "text-green-600 font-medium" : "text-red-600 font-medium"}>
                       {isNormal ? "Normal" : gazeStatus.replace(/_/g, " ")}

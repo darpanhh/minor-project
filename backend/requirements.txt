@@ -1,14 +1,11 @@
 fastapi
 uvicorn[standard]
-sqlalchemy
+sqlmodel
 psycopg2-binary
-pydantic-settings
-pydantic[email]
+bcrypt
 python-dotenv
 python-jose[cryptography]
-passlib[bcrypt]
 python-multipart
-alembic
 ultralytics
 opencv-python-headless
 mediapipe

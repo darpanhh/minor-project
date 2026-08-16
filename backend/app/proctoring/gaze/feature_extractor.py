@@ -13,12 +13,9 @@ class FeatureExtractor:
 
         head = self.head_pose.estimate(face.landmark, frame)
         if head is not None:
+            # Head-pose tracking uses ONLY yaw — pitch and roll are not used.
             result["yaw"] = head["yaw"]
-            result["pitch"] = head["pitch"]
-            result["roll"] = head["roll"]
         else:
             result["yaw"] = None
-            result["pitch"] = None
-            result["roll"] = None
 
         return result

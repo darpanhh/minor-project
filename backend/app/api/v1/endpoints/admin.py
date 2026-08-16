@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException
+from sqlmodel import Session
 from app.core.database import get_db
 from app.auth.dependencies import require_role
 from app.models.user import User, UserRole

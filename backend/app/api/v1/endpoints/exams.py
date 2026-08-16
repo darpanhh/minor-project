@@ -1,14 +1,14 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlmodel import Session
 from app.core.database import get_db
 from app.auth.dependencies import get_current_user, require_role
 from app.models.user import User, UserRole
 from app.models.exam import Exam, ExamSession, SessionStatus
-from app.models.event import ProctoringEvent, EventType
+from app.models.event import ProctoringEvent
 from app.models.report import CheatingLog
-from app.schemas.exam_schema import ExamCreate, ExamOut, ExamSessionOut, ExamSessionDetailOut
+from app.schemas.exam_schema import ExamOut, ExamSessionOut, ExamSessionDetailOut
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/exams", tags=["exams"])

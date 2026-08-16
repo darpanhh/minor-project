@@ -4,7 +4,6 @@ from .landmarks import (
     RIGHT_EYE_LEFT, RIGHT_EYE_RIGHT,
     LEFT_UPPER, LEFT_LOWER,
     RIGHT_UPPER, RIGHT_LOWER,
-    NOSE_TIP,
 )
 
 

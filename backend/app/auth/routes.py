@@ -1,16 +1,48 @@
 import os
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, UploadFile, File, Form, status
+from sqlmodel import Session
 from app.core.config import settings
 from app.core.database import get_db
 from app.auth.jwt_handler import create_access_token, create_refresh_token, verify_token
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import get_current_user, ACCESS_TOKEN_COOKIE
 from app.models.user import User, UserRole
-from app.schemas.user_schema import UserRegister, UserLogin, UserOut, UserRegisterResponse
+from app.schemas.user_schema import UserLogin, UserOut, UserRegisterResponse
 import bcrypt
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+REFRESH_TOKEN_COOKIE = "refresh_token"
+
+
+def _set_auth_cookies(
+    response: Response,
+    access_token: str,
+    refresh_token: str | None = None,
+) -> None:
+    """Store the JWTs in HttpOnly cookies so the browser sends them automatically."""
+    response.set_cookie(
+        key=ACCESS_TOKEN_COOKIE,
+        value=access_token,
+        httponly=True,
+        samesite="lax",
+        max_age=settings.JWT_ACCESS_EXPIRE_MINUTES * 60,
+        path="/",
+    )
+    if refresh_token:
+        response.set_cookie(
+            key=REFRESH_TOKEN_COOKIE,
+            value=refresh_token,
+            httponly=True,
+            samesite="lax",
+            max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 86400,
+            path="/",
+        )
+
+
+def _clear_auth_cookies(response: Response) -> None:
+    response.delete_cookie(ACCESS_TOKEN_COOKIE, path="/")
+    response.delete_cookie(REFRESH_TOKEN_COOKIE, path="/")
 
 
 @router.post("/register", response_model=UserRegisterResponse, status_code=status.HTTP_201_CREATED)
@@ -56,7 +88,7 @@ def register(
 
 
 @router.post("/login")
-def login(payload: UserLogin, db: Session = Depends(get_db)):
+def login(payload: UserLogin, response: Response, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == payload.email).first()
     if not user or not bcrypt.checkpw(payload.password.encode(), user.password_hash.encode()):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
@@ -64,6 +96,8 @@ def login(payload: UserLogin, db: Session = Depends(get_db)):
     token_data = {"sub": str(user.id), "role": user.role.value}
     access_token = create_access_token(token_data)
     refresh_token = create_refresh_token(token_data)
+
+    _set_auth_cookies(response, access_token, refresh_token)
 
     user_out = UserOut.model_validate(user)
     if user.registered_photo:
@@ -78,20 +112,36 @@ def login(payload: UserLogin, db: Session = Depends(get_db)):
 
 
 @router.post("/token/refresh")
-def refresh_token(refresh_token: str, db: Session = Depends(get_db)):
-    payload = verify_token(refresh_token)
+def refresh_token(
+    response: Response,
+    refresh_cookie: str | None = Cookie(alias=REFRESH_TOKEN_COOKIE, default=None),
+    db: Session = Depends(get_db),
+):
+    if not refresh_cookie:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing refresh token")
+
+    payload = verify_token(refresh_cookie)
     if payload is None or payload.get("type") != "refresh":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
 
-    user = db.query(User).filter(User.id == payload.get("sub")).first()
+    user = db.get(User, payload.get("sub"))
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
     token_data = {"sub": str(user.id), "role": user.role.value}
+    access_token = create_access_token(token_data)
+    _set_auth_cookies(response, access_token, refresh_token=refresh_cookie)
+
     return {
-        "access_token": create_access_token(token_data),
+        "access_token": access_token,
         "token_type": "bearer",
     }
+
+
+@router.post("/logout")
+def logout(response: Response):
+    _clear_auth_cookies(response)
+    return {"message": "Logged out"}
 
 
 @router.get("/me", response_model=UserOut)

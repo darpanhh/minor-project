@@ -4,13 +4,6 @@ from pydantic import BaseModel
 from typing import Any
 
 
-class ExamCreate(BaseModel):
-    title: str
-    start_time: datetime
-    duration_min: int
-    questions: Any
-
-
 class ExamOut(BaseModel):
     id: uuid.UUID
     title: str
@@ -20,10 +13,6 @@ class ExamOut(BaseModel):
     questions: Any
 
     model_config = {"from_attributes": True}
-
-
-class ExamSessionStart(BaseModel):
-    session_id: uuid.UUID
 
 
 class ExamSessionOut(BaseModel):

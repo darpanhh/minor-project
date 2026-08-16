@@ -185,37 +185,21 @@ class GazeEstimator:
 
     def compare_unsafe(self, current_features: dict) -> dict | None:
         """
-        Estimate gaze direction without calibration using raw head pose thresholds.
-        Returns a coarse zone (center / left / right / up / down) or None.
-        Used only when no calibration profile is available.
+        Estimate gaze direction without calibration using raw head-pose YAW only.
+        Returns a coarse horizontal zone (center / middle_left / middle_right)
+        or None when yaw is unavailable.
         """
         yaw = current_features.get("yaw")
-        pitch = current_features.get("pitch")
 
-        if yaw is None or pitch is None:
+        if yaw is None:
             return None
-
-        zone = "center"
 
         if yaw > 28:
             zone = "middle_left"
         elif yaw < -28:
             zone = "middle_right"
-
-        if pitch > 25:
-            if zone == "center":
-                zone = "top_center"
-            elif zone == "middle_left":
-                zone = "top_left"
-            elif zone == "middle_right":
-                zone = "top_right"
-        elif pitch < -32:
-            if zone == "center":
-                zone = "bottom_center"
-            elif zone == "middle_left":
-                zone = "bottom_left"
-            elif zone == "middle_right":
-                zone = "bottom_right"
+        else:
+            zone = "center"
 
         return {
             "point": zone,

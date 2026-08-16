@@ -1,13 +1,6 @@
 import uuid
 from datetime import datetime
-from pydantic import BaseModel, EmailStr
-
-
-class UserRegister(BaseModel):
-    full_name: str
-    email: str
-    password: str
-    student_id: str | None = None
+from pydantic import BaseModel
 
 
 class UserLogin(BaseModel):

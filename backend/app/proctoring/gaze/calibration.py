@@ -36,7 +36,9 @@ class CalibrationProcessor:
         roll = features.get("roll")
         if yaw is not None:
             print(f"Yaw: {yaw:.2f}")
+        if pitch is not None:
             print(f"Pitch: {pitch:.2f}")
+        if roll is not None:
             print(f"Roll: {roll:.2f}")
 
         if self.store.is_point_complete(point) and session_id:
@@ -44,7 +46,7 @@ class CalibrationProcessor:
             print(f"[CalibrationDB] Persisting {point} averages for session {session_id}")
             result = self.service.save_point(session_id, point, avg)
             if result is None:
-                print(f"[CalibrationDB] Failed to persist — invalid session")
+                print("[CalibrationDB] Failed to persist — invalid session")
 
         print()
 
