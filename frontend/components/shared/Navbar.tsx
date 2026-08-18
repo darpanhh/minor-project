@@ -32,11 +32,6 @@ export function Navbar() {
         </Link>
 
         <div className="flex items-center gap-3">
-          <div className="hidden sm:flex items-center gap-1.5 bg-muted/60 border border-border px-3 py-1 rounded-full text-xs font-medium text-muted-foreground">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span>AI Detector Ready</span>
-          </div>
-
           {user && (
             <>
               <div className="flex items-center gap-3 pl-2 border-l border-border/80">
