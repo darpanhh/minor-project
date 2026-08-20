@@ -24,6 +24,7 @@ class SessionState:
     last_multi_person_snapshot: float = 0.0
     last_phone_snapshot: float = 0.0
     last_absence_snapshot: float = 0.0
+    last_phone_seen: float = 0.0
 
 
 class ProctorDetector:
@@ -37,7 +38,7 @@ class ProctorDetector:
     class IDs dynamically from the model's own names dictionary.
     """
 
-    def __init__(self, model_path: str = "best.pt", conf_threshold: float = 0.25):
+    def __init__(self, model_path: str = "best.pt", conf_threshold: float = 0.50):
         self.model = YOLO(model_path)
         self.conf_threshold = conf_threshold
         self.sessions: dict[str, SessionState] = {}
@@ -65,7 +66,7 @@ class ProctorDetector:
         session_id: str,
         frame: np.ndarray,
         absence_timeout: float = 5.0,    # seconds with no person before alert
-        snapshot_cooldown: float = 10.0,  # min seconds between snapshots for same reason
+        snapshot_cooldown: float = 5.0,  # min seconds between snapshots for same reason
     ) -> dict:
         state = self.get_state(session_id)
         now = time.time()
@@ -131,6 +132,7 @@ class ProctorDetector:
 
         # --- Phone ---
         if phone_detected:
+            state.last_phone_seen = now
             alerts.append({"type": "phone_detected", "message": "Mobile phone detected"})
             if now - state.last_phone_snapshot > snapshot_cooldown:
                 snapshot_reasons.append("phone_detected")

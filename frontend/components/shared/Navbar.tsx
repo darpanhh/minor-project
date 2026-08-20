@@ -23,9 +23,7 @@ export function Navbar() {
           <div>
             <h1 className="text-lg font-bold text-foreground tracking-tight flex items-center gap-1.5 leading-tight">
               Vision<span className="text-primary font-black">Proctor</span>
-              <span className="text-[10px] uppercase font-bold px-1.5 py-0.5 rounded bg-primary/10 text-primary border border-primary/20">
-                AI
-              </span>
+              
             </h1>
             <p className="text-[11px] text-muted-foreground hidden sm:block">Real-time Intelligent Assessment Guardian</p>
           </div>

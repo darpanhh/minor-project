@@ -24,13 +24,27 @@ def list_all_sessions(
     db: Session = Depends(get_db),
     admin: User = Depends(require_role(UserRole.admin)),
 ):
-    sessions = db.query(ExamSession).order_by(ExamSession.started_at.desc()).limit(50).all()
+    from sqlalchemy import nulls_last
+    sessions = (
+        db.query(ExamSession)
+        .order_by(
+            nulls_last(ExamSession.submitted_at.desc()),
+            nulls_last(ExamSession.started_at.desc()),
+        )
+        .limit(50)
+        .all()
+    )
     result = []
     for s in sessions:
         student = db.query(User).filter(User.id == s.student_id).first()
+        exam = db.query(Exam).filter(Exam.id == s.exam_id).first()
+        events = db.query(ProctoringEvent).filter(ProctoringEvent.session_id == s.id).all()
+        event_count = len(events)
+        snapshot_count = sum(1 for e in events if e.snapshot_path)
         result.append({
             "id": str(s.id),
             "exam_id": str(s.exam_id),
+            "exam_title": exam.title if exam else "Unknown Exam",
             "student_id": str(s.student_id),
             "student_name": student.full_name if student else "Unknown",
             "student_email": student.email if student else "",
@@ -38,6 +52,8 @@ def list_all_sessions(
             "score": s.score,
             "final_score": s.final_score,
             "result_status": s.result_status.value if s.result_status else "pending",
+            "event_count": event_count,
+            "snapshot_count": snapshot_count,
             "started_at": s.started_at.isoformat() if s.started_at else None,
             "submitted_at": s.submitted_at.isoformat() if s.submitted_at else None,
         })
@@ -49,7 +65,16 @@ def list_reports(
     db: Session = Depends(get_db),
     admin: User = Depends(require_role(UserRole.admin)),
 ):
-    sessions = db.query(ExamSession).order_by(ExamSession.started_at.desc()).limit(50).all()
+    from sqlalchemy import nulls_last
+    sessions = (
+        db.query(ExamSession)
+        .order_by(
+            nulls_last(ExamSession.submitted_at.desc()),
+            nulls_last(ExamSession.started_at.desc()),
+        )
+        .limit(50)
+        .all()
+    )
     result = []
     for s in sessions:
         student = db.query(User).filter(User.id == s.student_id).first()
@@ -84,12 +109,51 @@ def get_session_detail(
 
     student = db.query(User).filter(User.id == session.student_id).first()
     exam = db.query(Exam).filter(Exam.id == session.exam_id).first()
+    from app.models.event import EventType
     events = db.query(ProctoringEvent).filter(
         ProctoringEvent.session_id == session_id
+    ).filter(
+        (ProctoringEvent.snapshot_path != None) |
+        (ProctoringEvent.event_type.in_([EventType.tab_switch, EventType.fullscreen_exit]))
     ).order_by(ProctoringEvent.timestamp.desc()).all()
     cheating_logs = db.query(CheatingLog).filter(
         CheatingLog.session_id == session_id
     ).order_by(CheatingLog.created_at.desc()).all()
+
+    # Deduplicate per-episode events: for each event type, consecutive events
+    # within EPISODE_GAP seconds are considered the same episode. Keep only
+    # the one that has a snapshot; if none do, keep the first occurrence.
+    EPISODE_GAP = 15.0  # seconds between episodes
+
+    def _dedup_events(raw_events: list) -> list:
+        from datetime import timezone as _tz
+        episodes: dict[str, dict] = {}  # key = event_type, val = {"best": event, "last_ts": datetime}
+        result_order: list = []  # ordered list of "best" events per episode
+
+        for ev in sorted(raw_events, key=lambda x: x.timestamp):
+            key = ev.event_type.value
+            ts = ev.timestamp
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=_tz.utc)
+
+            ep = episodes.get(key)
+            if ep is None or (ts - ep["last_ts"]).total_seconds() > EPISODE_GAP:
+                # New episode — start fresh
+                ep = {"best": ev, "last_ts": ts}
+                episodes[key] = ep
+                result_order.append(ep)
+            else:
+                # Same episode — prefer the event with a snapshot
+                ep["last_ts"] = ts
+                if ep["best"].snapshot_path is None and ev.snapshot_path is not None:
+                    ep["best"] = ev
+
+        # Re-sort by the kept event's timestamp descending (latest first)
+        kept = [ep["best"] for ep in result_order]
+        kept.sort(key=lambda x: x.timestamp, reverse=True)
+        return kept
+
+    events_deduped = _dedup_events(events)
 
     return {
         "session": {
@@ -120,7 +184,7 @@ def get_session_detail(
             "occurrence": e.occurrence,
             "duration": round(e.duration, 1) if e.duration is not None else None,
             "action": e.action,
-        } for e in events],
+        } for e in events_deduped],
         "cheating_logs": [{
             "id": str(c.id),
             "evidence_path": c.evidence_path,

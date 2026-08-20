@@ -35,15 +35,19 @@ export default function AdminSessionDetailPage() {
   const [finalScore, setFinalScore] = useState<string>("");
   const [notes, setNotes] = useState<string>("");
   const [grading, setGrading] = useState(false);
-  const [gradeMsg, setGradeMsg] = useState<string | null>(null);
   const [gradeError, setGradeError] = useState<string | null>(null);
+  const [showReleasedModal, setShowReleasedModal] = useState(false);
+  const [previewSnapshot, setPreviewSnapshot] = useState<{ src: string; alt: string } | null>(null);
 
   useEffect(() => {
     if (!id || !user) return;
     api.getAdminSessionDetail(id)
       .then((d) => {
         setData(d);
-        if (d.session?.score != null) setFinalScore(String(Math.round(d.session.score)));
+        // Pre-fill with the released score, otherwise with the auto-computed
+        // score (unanswered = wrong) so a fresh release can't default to 100%.
+        if (d.session?.final_score != null) setFinalScore(String(Math.round(d.session.final_score)));
+        else if (d.session?.score != null) setFinalScore(String(Math.round(d.session.score)));
         if (d.session?.admin_notes) setNotes(d.session.admin_notes);
       })
       .catch(console.error)
@@ -58,14 +62,13 @@ export default function AdminSessionDetailPage() {
       return;
     }
     setGrading(true);
-    setGradeMsg(null);
     setGradeError(null);
     try {
       await api.gradeSession(data.session.id, score, notes.trim() || undefined);
       const refreshed = await api.getAdminSessionDetail(data.session.id);
       setData(refreshed);
       if (refreshed.session?.admin_notes) setNotes(refreshed.session.admin_notes);
-      setGradeMsg("Result released to the student.");
+      setShowReleasedModal(true);
     } catch (err: any) {
       setGradeError(err.message || "Failed to release result");
     } finally {
@@ -99,7 +102,11 @@ export default function AdminSessionDetailPage() {
 
   const { session, events, cheating_logs, answers, questions } = data;
   const reviewed = session.result_status === "reviewed";
-  const snapshots = (events || []).filter((e: any) => e.snapshot_path);
+  const autoCorrect = (questions || []).reduce(
+    (n: number, q: any, i: number) =>
+      n + (answers?.[String(i)] != null && answers[String(i)] === q.correct_answer ? 1 : 0),
+    0
+  );
 
   return (
     <ProtectedRoute role="admin">
@@ -125,7 +132,7 @@ export default function AdminSessionDetailPage() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
           <div className="stat-card">
             <p className="text-xs text-slate-500 uppercase tracking-wide font-medium mb-1">Student</p>
             <p className="font-semibold text-slate-900">{session.student_name}</p>
@@ -143,17 +150,6 @@ export default function AdminSessionDetailPage() {
               </p>
             )}
           </div>
-          <div className="stat-card">
-            <p className="text-xs text-slate-500 uppercase tracking-wide font-medium mb-1">Auto Score (ref)</p>
-            <p className={`text-3xl font-bold ${
-              session.score != null && session.score >= 60 ? "text-emerald-600" :
-              session.score != null && session.score >= 40 ? "text-amber-600" :
-              session.score != null ? "text-red-600" : "text-slate-400"
-            }`}>
-              {session.score != null ? `${Math.round(session.score)}%` : "N/A"}
-            </p>
-          </div>
-          
         </div>
 
         {/* ── Grade / release result ─────────────────────────────────── */}
@@ -180,10 +176,12 @@ export default function AdminSessionDetailPage() {
                   className="w-32 px-3 py-2 rounded-lg border border-slate-300 text-sm font-semibold text-slate-900"
                   placeholder="0 - 100"
                 />
-                {session.score != null && (
-                  <span className="text-xs text-slate-400">Auto-calculated: {Math.round(session.score)}%</span>
-                )}
               </div>
+              {!reviewed && session.score != null && (
+                <p className="text-xs text-slate-500 mt-1.5">
+                  Auto score: {Math.round(session.score)}% ({autoCorrect}/{questions?.length || 0} correct) — unanswered counts as wrong
+                </p>
+              )}
             </div>
             <div>
               <label className="block text-xs font-medium text-slate-500 mb-1">Administrator Note (visible to student)</label>
@@ -197,9 +195,6 @@ export default function AdminSessionDetailPage() {
             </div>
           </div>
 
-          {gradeMsg && (
-            <div className="mt-3 text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">{gradeMsg}</div>
-          )}
           {gradeError && (
             <div className="mt-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{gradeError}</div>
           )}
@@ -218,45 +213,6 @@ export default function AdminSessionDetailPage() {
               ) : reviewed ? "Update Result" : "Release Result"}
             </button>
           </div>
-        </div>
-
-        {/* ── Violation snapshots ────────────────────────────────────── */}
-        <div className="content-card mb-8">
-          <h2 className="text-base font-semibold text-slate-900 mb-1">Violation Snapshots ({snapshots.length})</h2>
-          <p className="text-sm text-slate-500 mb-4">
-            Captured automatically whenever a violation was recorded during the exam.
-          </p>
-          {snapshots.length > 0 ? (
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-              {snapshots.map((e: any, i: number) => (
-                <a
-                  key={e.id || i}
-                  href={serverUrl(e.snapshot_path)}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="group block rounded-xl overflow-hidden border border-slate-200 hover:border-slate-300 transition"
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={serverUrl(e.snapshot_path)}
-                    alt={`${e.event_type.replace(/_/g, " ")} snapshot`}
-                    className="w-full aspect-video object-cover bg-slate-100"
-                  />
-                  <div className="px-3 py-2.5 bg-white">
-                    <div className="flex items-center justify-between">
-                      <EventBadge type={e.event_type} />
-                      <span className="text-xs text-slate-400">{new Date(e.timestamp).toLocaleString()}</span>
-                    </div>
-                    <p className="text-xs text-slate-500 mt-1">
-                      Confidence: {Math.round((e.confidence || 0) * 100)}% · Click to view full size
-                    </p>
-                  </div>
-                </a>
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-slate-400 text-center py-6">No violation snapshots recorded for this session.</p>
-          )}
         </div>
 
         {/* ── Answer review ──────────────────────────────────────────── */}
@@ -352,75 +308,145 @@ export default function AdminSessionDetailPage() {
         )}
 
         <div className="content-card mb-8">
-          <h2 className="text-base font-semibold text-slate-900 mb-1">Proctoring Events ({events?.length || 0})</h2>
+          <h2 className="text-base font-semibold text-slate-900 mb-1">Proctoring Events &amp; Evidence ({events?.length || 0})</h2>
           <p className="text-sm text-slate-500 mb-4">
-            Chronological warning / incident history for this session. For tab switches and
-            fullscreen exits, the first occurrence is a warning only; repeated occurrences are
-            recorded as incidents with the time the student was away.
+            Chronological event history. Evidence snapshots appear directly below the event
+            that produced them; select an image to preview it.
           </p>
           {events?.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-slate-100">
-                    <th className="text-left py-3 pr-4 text-xs font-medium text-slate-500 uppercase tracking-wide">Event Type</th>
-                    <th className="text-left py-3 pr-4 text-xs font-medium text-slate-500 uppercase tracking-wide">Timestamp</th>
-                    <th className="text-left py-3 pr-4 text-xs font-medium text-slate-500 uppercase tracking-wide">Occurrence</th>
-                    <th className="text-left py-3 pr-4 text-xs font-medium text-slate-500 uppercase tracking-wide">Duration Away</th>
-                    <th className="text-left py-3 pr-4 text-xs font-medium text-slate-500 uppercase tracking-wide">Action Taken</th>
-                    <th className="text-left py-3 pr-4 text-xs font-medium text-slate-500 uppercase tracking-wide">Confidence</th>
-                    <th className="text-left py-3 text-xs font-medium text-slate-500 uppercase tracking-wide">Snapshot</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {events.map((e: any) => (
-                    <tr key={e.id} className={`border-b border-slate-50 transition-colors ${
-                      isClientEvent(e.event_type)
-                        ? e.occurrence && e.occurrence >= 2
-                          ? "bg-red-50/50 hover:bg-red-50"
-                          : "bg-amber-50/50 hover:bg-amber-50"
-                        : "hover:bg-slate-50/50"
-                    }`}>
-                      <td className="py-3 pr-4"><EventBadge type={e.event_type} /></td>
-                      <td className="py-3 pr-4 text-sm text-slate-700">{new Date(e.timestamp).toLocaleString()}</td>
-                      <td className="py-3 pr-4 text-sm text-slate-700">
-                        {isClientEvent(e.event_type) && e.occurrence
-                          ? `#${e.occurrence}`
-                          : <span className="text-slate-300">—</span>}
-                      </td>
-                      <td className="py-3 pr-4 text-sm text-slate-700">
-                        {isClientEvent(e.event_type) && e.duration != null
-                          ? `${e.duration >= 60 ? `${Math.floor(e.duration / 60)}m ` : ""}${(e.duration % 60).toFixed(1)}s`
-                          : <span className="text-slate-300">—</span>}
-                      </td>
-                      <td className="py-3 pr-4 text-sm">
-                        {e.action ? (
-                          <span className={`inline-flex px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                            isClientEvent(e.event_type) && e.occurrence && e.occurrence >= 2
-                              ? "bg-red-100 text-red-700"
-                              : "bg-amber-100 text-amber-700"
-                          }`}>{e.action}</span>
-                        ) : (
-                          <span className="text-slate-300">—</span>
+            <div className="space-y-4">
+              {events.map((e: any) => {
+                const snapshotAlt = `${e.event_type.replace(/_/g, " ")} snapshot`;
+                return (
+                  <article key={e.id} className={`overflow-hidden rounded-xl border transition-colors ${
+                    isClientEvent(e.event_type)
+                      ? e.occurrence && e.occurrence >= 2
+                        ? "border-red-200 bg-red-50/40"
+                        : "border-amber-200 bg-amber-50/40"
+                      : "border-slate-200 bg-white"
+                  }`}>
+                    <div className="p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <EventBadge type={e.event_type} />
+                        <time className="text-xs text-slate-400">{new Date(e.timestamp).toLocaleString()}</time>
+                      </div>
+                      <div className="mt-3 grid grid-cols-1 gap-3 text-sm sm:grid-cols-3">
+                        {isClientEvent(e.event_type) && e.occurrence && (
+                          <div><p className="text-xs font-medium uppercase tracking-wide text-slate-400">Occurrence</p><p className="mt-0.5 text-slate-700">#{e.occurrence}</p></div>
                         )}
-                      </td>
-                      <td className="py-3 pr-4 text-sm text-slate-700">{(e.confidence * 100).toFixed(0)}%</td>
-                      <td className="py-3 text-sm">
-                        {e.snapshot_path ? (
-                          <a href={serverUrl(e.snapshot_path)} target="_blank" rel="noreferrer" className="text-indigo-600 hover:text-indigo-700 font-medium">View</a>
-                        ) : (
-                          <span className="text-slate-300">—</span>
+                        {isClientEvent(e.event_type) && e.duration != null && (
+                          <div><p className="text-xs font-medium uppercase tracking-wide text-slate-400">Time away</p><p className="mt-0.5 text-slate-700">{e.duration >= 60 ? `${Math.floor(e.duration / 60)}m ` : ""}{(e.duration % 60).toFixed(1)}s</p></div>
                         )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                        {!isClientEvent(e.event_type) && e.event_type !== "person_absent" && (
+                          <div><p className="text-xs font-medium uppercase tracking-wide text-slate-400">Confidence</p><p className="mt-0.5 text-slate-700">{(e.confidence * 100).toFixed(0)}%</p></div>
+                        )}
+                      </div>
+                    </div>
+                    {e.snapshot_path ? (
+                      <button
+                        type="button"
+                        onClick={() => setPreviewSnapshot({ src: serverUrl(e.snapshot_path), alt: snapshotAlt })}
+                        className="block w-full border-t border-slate-200 bg-white text-left"
+                        aria-label={`Preview ${snapshotAlt}`}
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={serverUrl(e.snapshot_path)}
+                          alt={snapshotAlt}
+                          className="max-h-96 w-full object-contain object-left"
+                          onError={(ev) => {
+                            const t = ev.currentTarget;
+                            t.style.display = "none";
+                            const p = t.nextElementSibling as HTMLElement | null;
+                            if (p) p.style.display = "flex";
+                          }}
+                        />
+                        <span className="block px-4 py-2 text-xs font-medium text-indigo-600">Click image to preview</span>
+                      </button>
+                    ) : !isClientEvent(e.event_type) && (
+                      <div className="flex items-center gap-2 px-4 py-3 border-t border-slate-100 bg-slate-50/60 text-xs text-slate-400">
+                        <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                        </svg>
+                        No snapshot captured for this event
+                      </div>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          ) : session.status === "registered" ? (
+            <div className="text-center py-8 text-slate-500">
+              <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center mx-auto mb-2 text-slate-400">
+                <span className="material-symbols-outlined text-xl">pending</span>
+              </div>
+              <p className="text-sm font-semibold text-slate-700">Exam Not Started Yet</p>
+              <p className="text-xs text-slate-400 mt-1">This student registered for the exam. Proctoring events and snapshots will appear once they start the session.</p>
             </div>
           ) : (
-            <p className="text-sm text-slate-400 text-center py-6">No events recorded</p>
+            <div className="text-center py-8 text-slate-500">
+              <div className="w-10 h-10 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto mb-2">
+                <span className="material-symbols-outlined text-xl">verified_user</span>
+              </div>
+              <p className="text-sm font-semibold text-slate-700">Clean Proctoring Session</p>
+              <p className="text-xs text-slate-400 mt-1">No violations or suspicious events were recorded during this exam session.</p>
+            </div>
           )}
         </div>
+
+        {previewSnapshot && (
+          <div
+            className="fixed inset-0 z-[200] flex items-center justify-center bg-black/75 p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Snapshot preview"
+            onClick={() => setPreviewSnapshot(null)}
+          >
+            <div className="relative flex h-[92vh] w-[96vw] items-center justify-center" onClick={(event) => event.stopPropagation()}>
+              <button
+                type="button"
+                onClick={() => setPreviewSnapshot(null)}
+                className="absolute right-3 top-3 z-10 flex h-9 w-9 items-center justify-center rounded-full bg-black/70 text-white transition hover:bg-black"
+                aria-label="Close preview"
+              >
+                <span className="material-symbols-outlined">close</span>
+              </button>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={previewSnapshot.src} alt={previewSnapshot.alt} className="max-h-full max-w-full rounded-xl bg-white object-contain shadow-2xl" />
+            </div>
+          </div>
+        )}
+
+        {showReleasedModal && (
+          <div
+            className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Result released"
+            onClick={() => setShowReleasedModal(false)}
+          >
+            <div
+              className="w-full max-w-sm rounded-2xl bg-white p-8 text-center shadow-2xl animate-fade-in"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-emerald-100">
+                <svg className="h-9 w-9 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                </svg>
+              </div>
+              <h3 className="text-lg font-bold text-slate-900">Result Released</h3>
+              <p className="mt-1 text-sm text-slate-500">The result has been released to the student.</p>
+              <button
+                type="button"
+                onClick={() => setShowReleasedModal(false)}
+                className="btn-primary mt-5 w-full"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        )}
 
         {cheating_logs && cheating_logs.length > 0 && (
           <div className="content-card">

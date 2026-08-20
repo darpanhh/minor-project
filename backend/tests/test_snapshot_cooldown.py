@@ -3,7 +3,7 @@ Tests for the ws_proctor snapshot rules.
 
 Per-event-type cooldown:
 
-    for a given violation type, never take two snapshots within 5 seconds.
+    for a given violation type, never take two snapshots within SNAPSHOT_COOLDOWN.
 
 ``_can_snapshot`` is the SINGLE source of truth: it both checks eligibility
 AND atomically reserves the slot (records the monotonic timestamp) when the
@@ -27,6 +27,8 @@ from app.proctoring.ws_proctor import (  # noqa: E402
     _snapshot_store,
     _can_snapshot,
 )
+
+CD = SNAPSHOT_COOLDOWN  # all windows below are derived from this single constant
 
 
 class _Clock:
@@ -53,12 +55,12 @@ def test_same_reason_within_5s_is_blocked():
     assert _can_snapshot(key, "gaze_away", clock.t) is True  # t=0 allowed
     clock.advance(1.0)
     assert _can_snapshot(key, "gaze_away", clock.t) is False  # t=1 blocked
-    clock.advance(3.0)
-    assert _can_snapshot(key, "gaze_away", clock.t) is False  # t=4 blocked
+    clock.advance(CD - 2.0)
+    assert _can_snapshot(key, "gaze_away", clock.t) is False  # t=CD-1 blocked
     clock.advance(0.9)
-    assert _can_snapshot(key, "gaze_away", clock.t) is False  # t=4.9 blocked
+    assert _can_snapshot(key, "gaze_away", clock.t) is False  # t=CD-0.1 blocked
     clock.advance(0.2)
-    assert _can_snapshot(key, "gaze_away", clock.t) is True  # t=5.1 allowed
+    assert _can_snapshot(key, "gaze_away", clock.t) is True  # t=CD+0.1 allowed
 
 
 def test_same_reason_after_5s_is_allowed():
@@ -67,7 +69,7 @@ def test_same_reason_after_5s_is_allowed():
 
     assert _can_snapshot(key, "phone_detected", clock.t) is True  # t=0
     assert _can_snapshot(key, "phone_detected", clock.t) is False  # t=0 refresh
-    clock.advance(SNAPSHOT_COOLDOWN)  # t=5 exactly
+    clock.advance(SNAPSHOT_COOLDOWN)  # t=CD exactly
     assert _can_snapshot(key, "phone_detected", clock.t) is True
 
 
@@ -87,18 +89,18 @@ def test_different_reasons_within_5s_are_independent():
     assert _can_snapshot(key, "phone_detected", clock.t) is False
 
     # Unused type is untouched by the others' snapshots.
-    clock.advance(4.0)  # t=5: all types' windows have expired independently.
-    assert _can_snapshot(key, "phone_detected", clock.t) is True  # stamps t=5
-    assert _can_snapshot(key, "gaze_away", clock.t) is True  # stamps t=5
-    assert _can_snapshot(key, "head_turn", clock.t) is True  # stamps t=5
+    clock.advance(CD - 1.0)  # t=CD: all types' windows have expired independently.
+    assert _can_snapshot(key, "phone_detected", clock.t) is True  # stamps t=CD
+    assert _can_snapshot(key, "gaze_away", clock.t) is True  # stamps t=CD
+    assert _can_snapshot(key, "head_turn", clock.t) is True  # stamps t=CD
 
     # A snapshot for one type does not reset the others' timers.
-    clock.advance(3.0)  # t=8
-    assert _can_snapshot(key, "head_turn", clock.t) is False  # restamped t=5
-    assert _can_snapshot(key, "gaze_away", clock.t) is False  # restamped t=5
+    clock.advance(3.0)  # t=CD+3
+    assert _can_snapshot(key, "head_turn", clock.t) is False  # restamped t=CD
+    assert _can_snapshot(key, "gaze_away", clock.t) is False  # restamped t=CD
     assert _can_snapshot(key, "phone_detected", clock.t) is False
 
-    clock.advance(2.2)  # t=10.2 ≥ 5s after every type's t=5 stamp
+    clock.advance(CD + 0.2)  # t=2·CD+3.2 ≥ CD after every type's t=CD stamp
     assert _can_snapshot(key, "head_turn", clock.t) is True
     assert _can_snapshot(key, "gaze_away", clock.t) is True
 
@@ -115,7 +117,7 @@ def test_confirmation_plus_refresh_in_same_episode_yields_one_snapshot():
     assert _can_snapshot(key, "gaze_away", clock.t) is False
     clock.advance(1.0)
     assert _can_snapshot(key, "gaze_away", clock.t) is False
-    clock.advance(3.2)  # t=5.2
+    clock.advance(CD + 0.2)  # t=CD+2.2
     assert _can_snapshot(key, "gaze_away", clock.t) is True
 
 
@@ -132,9 +134,9 @@ def test_rejected_snapshot_does_not_update_timestamp():
     # The stored timestamp is untouched by a rejection.
     assert _last_seen(key, "head_turn") == 0.0
 
-    clock.advance(3.2)  # t=5.2
+    clock.advance(CD + 0.2)  # t=CD+2.2
     assert _can_snapshot(key, "head_turn", clock.t) is True
-    assert _last_seen(key, "head_turn") == 5.2
+    assert _last_seen(key, "head_turn") == CD + 2.2
 
 
 def test_same_session_reconnect_preserves_cooldown_state():
@@ -143,14 +145,14 @@ def test_same_session_reconnect_preserves_cooldown_state():
 
     # First connection takes a snapshot.
     assert _can_snapshot(key, "head_turn", clock.t) is True  # t=0
-    clock.advance(4.0)
+    clock.advance(CD - 1.0)
 
     # A brand-new connection for the SAME session_uuid must still be blocked.
     assert _can_snapshot(key, "head_turn", clock.t) is False
     # And a type that never snapshotted is free immediately.
     assert _can_snapshot(key, "gaze_away", clock.t) is True
 
-    clock.advance(2.0)  # t=6
+    clock.advance(CD + 1.0)  # t=2·CD
     assert _can_snapshot(key, "head_turn", clock.t) is True
 
 
@@ -174,9 +176,9 @@ def test_refresh_only_when_still_active():
 
 if __name__ == "__main__":
     test_same_reason_within_5s_is_blocked()
-    print(f"PASS within 5s blocked ({SNAPSHOT_COOLDOWN}s)")
+    print(f"PASS within {SNAPSHOT_COOLDOWN:.0f}s blocked ({SNAPSHOT_COOLDOWN}s)")
     test_same_reason_after_5s_is_allowed()
-    print("PASS after 5s allowed")
+    print("PASS after cooldown allowed")
     test_different_reasons_within_5s_are_independent()
     print("PASS types never block each other")
     test_confirmation_plus_refresh_in_same_episode_yields_one_snapshot()

@@ -27,6 +27,9 @@ interface GazeData {
   predicted_point: string | null;
   confidence: number;
   yaw: number | null;
+  pitch?: number | null;
+  head_direction: string;
+  eye_direction: string;
   violation_active: boolean;
   violation_type: string | null;
   violation_duration: number;
@@ -45,7 +48,8 @@ interface ProctorResult {
 
 const WS_BASE =
   process.env.NEXT_PUBLIC_PROCTOR_WS_URL || "ws://localhost:8000/ws/proctor";
-const SEND_INTERVAL_MS = 1000;
+// Send a camera frame to the proctoring WebSocket three times each second.
+const SEND_INTERVAL_MS = 1000 / 3;
 
 interface ProctoringMonitorProps {
   sessionId: string;
@@ -57,6 +61,90 @@ const MAX_RECONNECT_ATTEMPTS = 10;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 
+// Direction → display label and status colour:
+//   center → Normal (green), left/right/up/down → Attention (amber),
+//   not_detected → Detection issue (red)
+function directionMeta(dir: string | undefined) {
+  const d = dir || "not_detected";
+  const label =
+    d === "not_detected" ? "Not Detected" : d.charAt(0).toUpperCase() + d.slice(1);
+  const color =
+    d === "center" ? "#22c55e" : d === "not_detected" ? "#ef4444" : "#f59e0b";
+  return { label, color };
+}
+
+const WARNING_LABELS: Record<string, string> = {
+  gaze_away: "Looking away",
+  head_turn: "Head turned",
+  phone_detected: "Phone detected",
+  multiple_persons: "Multiple people",
+  person_absent: "No person detected",
+};
+
+function drawHud(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  dirs: { head: { label: string; color: string }; eye: { label: string; color: string } },
+  warnings: ActiveWarning[] = []
+) {
+  const panelW = 168;
+  const panelPad = 12;
+  const rowH = 24;
+  let panelH = panelPad * 2 + rowH * 2;
+  const gazeWarnings = warnings.filter(
+    (w) => w.type === "gaze_away" || w.type === "head_turn"
+  );
+  if (gazeWarnings.length > 0) panelH += rowH + 4;
+
+  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  ctx.beginPath();
+  ctx.roundRect(x, y, panelW, panelH, 10);
+  ctx.fill();
+
+  let cursor = y + panelPad;
+  const rows: Array<{ label: string; color: string }> = [
+    { label: dirs.head.label, color: dirs.head.color },
+    { label: dirs.eye.label, color: dirs.eye.color },
+  ];
+  const rowLabels = ["HEAD", "EYES"];
+
+  rows.forEach((row, i) => {
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    ctx.font = "bold 11px sans-serif";
+    ctx.fillText(rowLabels[i], x + panelPad, cursor + 13);
+
+    ctx.fillStyle = row.color;
+    ctx.beginPath();
+    ctx.arc(x + panelPad + 46, cursor + 9, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 14px sans-serif";
+    ctx.fillText(row.label, x + panelPad + 58, cursor + 14);
+    cursor += rowH;
+  });
+
+  if (gazeWarnings.length > 0) {
+    const w = gazeWarnings[0];
+    const isViolation = w.level === "violation";
+    const wColor = isViolation ? "#ef4444" : "#f59e0b";
+    ctx.fillStyle = isViolation
+      ? "rgba(239,68,68,0.35)"
+      : "rgba(245,158,11,0.30)";
+    ctx.beginPath();
+    ctx.roundRect(x + panelPad, cursor - 6, panelW - panelPad * 2, 22, 6);
+    ctx.fill();
+    ctx.fillStyle = wColor;
+    ctx.font = "bold 11px sans-serif";
+    ctx.fillText(
+      `${isViolation ? "Violation" : "Warning"}: ${WARNING_LABELS[w.type] || w.message}`,
+      x + panelPad + 8,
+      cursor + 9
+    );
+  }
+}
+
 export default function ProctoringMonitor({
   sessionId,
   videoRef,
@@ -66,6 +154,7 @@ export default function ProctoringMonitor({
   const wsRef = useRef<WebSocket | null>(null);
   const alertsRef = useRef<Alert[]>([]);
   const gazeRef = useRef<GazeData | null>(null);
+  const warningsRef = useRef<ActiveWarning[]>([]);
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
@@ -77,7 +166,6 @@ export default function ProctoringMonitor({
   const [activeWarnings, setActiveWarnings] = useState<ActiveWarning[]>([]);
   const [mounted, setMounted] = useState(false);
   const [gazeStatus, setGazeStatus] = useState<string | null>("normal");
-  const [gazeAngles, setGazeAngles] = useState<string>("");
   const [wsError, setWsError] = useState(false);
   const [fatalError, setFatalError] = useState<string | null>(null);
 
@@ -122,26 +210,23 @@ export default function ProctoringMonitor({
         ctx.fillStyle = "#ef4444";
         ctx.font = "bold 18px sans-serif";
         ctx.textAlign = "center";
-        ctx.fillText("⚠ NO FACE DETECTED", cx, cy);
+        ctx.fillText("⚠ FACE NOT DETECTED", cx, cy);
         ctx.textAlign = "start";
+
+        // HUD panel still shown so the detection issue is explicit
+        const hHead = directionMeta("not_detected");
+        const hEye = directionMeta("not_detected");
+        drawHud(ctx, 10, 10, { head: hHead, eye: hEye }, warningsRef.current);
         return;
       }
 
-      const violation = gaze.violation_active && gaze.status !== "normal";
-      const baseColor = violation ? "#ef4444" : "#22c55e";
+      const head = directionMeta(gaze.head_direction);
+      const eye = directionMeta(gaze.eye_direction);
+      const attention = head.label !== "Center" || eye.label !== "Center";
+      const baseColor = attention ? "#f59e0b" : "#22c55e";
 
-      // ── Status badge (top-right) ─────────────────────────────
-      {
-        const statusColor =
-          gaze.status === "normal" ? "#22c55e" : "#ef4444";
-        ctx.fillStyle = statusColor;
-        ctx.globalAlpha = 0.85;
-        ctx.fillRect(cw - 170, 8, 162, 26);
-        ctx.globalAlpha = 1;
-        ctx.fillStyle = "#fff";
-        ctx.font = "bold 13px sans-serif";
-        ctx.fillText(gaze.status.replace(/_/g, " ").toUpperCase(), cw - 162, 27);
-      }
+      // ── Head/Eyes HUD panel (top-left) ─────────────────────────
+      drawHud(ctx, 10, 10, { head, eye }, warningsRef.current);
 
       // ── Head outline (ellipse) ───────────────────────────────
       ctx.strokeStyle = "rgba(255,255,255,0.15)";
@@ -150,12 +235,13 @@ export default function ProctoringMonitor({
       ctx.ellipse(cx, cy, cw * 0.14, ch * 0.30, 0, 0, Math.PI * 2);
       ctx.stroke();
 
-      // ── Gaze direction arrow + dot (head signs are yaw-only) ──
-      if (gaze.yaw !== null) {
-        const displayYaw = -gaze.yaw;
-        const displayPitch = 0;
-        const scale = Math.max(cw, ch) / 100;
-        const gx = cx + displayYaw * scale;
+// ── Direction arrow (yaw + pitch, from the student's perspective) ──
+        // Negative yaw = head turned to the student's left → arrow deflects
+        // image-right (the student's left side in a non-mirrored feed).
+        if (gaze.yaw !== null) {
+          const displayPitch = gaze.pitch ?? 0;
+          const scale = Math.max(cw, ch) / 100;
+          const gx = cx - gaze.yaw * scale;
         const gy = cy + displayPitch * scale;
         const clampedGx = Math.max(10, Math.min(cw - 10, gx));
         const clampedGy = Math.max(10, Math.min(ch - 10, gy));
@@ -205,46 +291,6 @@ export default function ProctoringMonitor({
         ctx.strokeStyle = baseColor;
         ctx.lineWidth = 2;
         ctx.stroke();
-      }
-
-      // ── Looking-at label (top-left, large) ───────────────────
-      {
-        const zone = gaze.predicted_point || "center";
-        const isNormal = gaze.status === "normal" && !violation;
-        ctx.fillStyle = isNormal ? "rgba(34,197,94,0.90)" : "rgba(239,68,68,0.90)";
-        ctx.font = "bold 15px sans-serif";
-        const label = `Looking: ${zone.replace(/_/g, " ")} ${isNormal ? "✓" : "⚠"}`;
-        ctx.fillText(label, 10, 30);
-
-        // Confidence bar
-        const barX = 10;
-        const barY = 40;
-        const barW = 120;
-        const barH = 6;
-        ctx.fillStyle = "rgba(255,255,255,0.20)";
-        ctx.fillRect(barX, barY, barW, barH);
-        ctx.fillStyle = isNormal ? "#22c55e" : "#f59e0b";
-        ctx.fillRect(barX, barY, barW * gaze.confidence, barH);
-        ctx.fillStyle = "rgba(255,255,255,0.60)";
-        ctx.font = "10px sans-serif";
-        ctx.fillText(`${(gaze.confidence * 100).toFixed(0)}%`, barX + barW + 6, barY + 6);
-      }
-
-      // ── Angle readout (bottom-left corner) — yaw only ───────
-      if (gaze.yaw !== null) {
-        ctx.fillStyle = "rgba(255,255,255,0.70)";
-        const yOff = ch - 60;
-
-        const hDir = gaze.yaw > 12 ? "← LEFT" : gaze.yaw < -12 ? "RIGHT →" : "CENTER";
-        ctx.font = "bold 13px sans-serif";
-        ctx.fillText(hDir, 10, yOff);
-
-        ctx.font = "11px monospace";
-        ctx.fillStyle = "rgba(255,255,255,0.50)";
-        ctx.fillText(
-          `yaw ${gaze.yaw >= 0 ? "+" : ""}${gaze.yaw.toFixed(0)}°`,
-          10, yOff + 16,
-        );
       }
     },
     [videoRef]
@@ -311,6 +357,7 @@ export default function ProctoringMonitor({
         if (!mountedRef.current) return;
         setConnected(false);
         setActiveWarnings([]);
+        warningsRef.current = [];
 
         console.warn("Proctor WS closed: code=%d reason=%s", e.code, e.reason);
 
@@ -336,6 +383,7 @@ export default function ProctoringMonitor({
         if (!mountedRef.current) return;
         setConnected(false);
         setActiveWarnings([]);
+        warningsRef.current = [];
         setWsError(true);
       };
 
@@ -353,19 +401,13 @@ export default function ProctoringMonitor({
           drawOverlay(result.detections);
 
           if (result.active_warnings) {
+            warningsRef.current = result.active_warnings;
             setActiveWarnings(result.active_warnings);
           }
 
           if (result.gaze) {
             gazeRef.current = result.gaze;
             setGazeStatus(result.gaze.status);
-            if (result.gaze.yaw !== null) {
-              setGazeAngles(
-                `Y${result.gaze.yaw >= 0 ? "+" : ""}${result.gaze.yaw.toFixed(0)}`
-              );
-            } else {
-              setGazeAngles("");
-            }
           }
 
           for (const alert of result.alerts) {
@@ -510,28 +552,19 @@ export default function ProctoringMonitor({
 
             {gazeStatus && (() => {
               const gaze = gazeRef.current;
-              const pt = gaze?.predicted_point;
-              const conf = gaze?.confidence ?? 0;
-              const isNormal = gazeStatus === "normal";
+              if (!gaze) return null;
+              const head = directionMeta(gaze.head_direction);
+              const eye = directionMeta(gaze.eye_direction);
               return (
                 <>
                   <span className="flex items-center gap-1">
-                    <span className={`inline-block w-2 h-2 rounded-full ${
-                      isNormal ? "bg-green-500" : "bg-red-500"
-                    }`} />
-                    <span className={isNormal ? "text-green-600 font-medium" : "text-red-600 font-medium"}>
-                      {isNormal ? "Normal" : gazeStatus.replace(/_/g, " ")}
-                    </span>
+                    <span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: head.color }} />
+                    <span className="text-gray-600 font-medium">Head: {head.label}</span>
                   </span>
-                  {pt && (
-                    <span className="text-gray-500">
-                      {pt === "center" ? "Center ✓" : pt.replace(/_/g, " ") + " ⚠"}
-                    </span>
-                  )}
-                  <span className="text-gray-400">{(conf * 100).toFixed(0)}%</span>
-                  {gazeAngles && (
-                    <span className="text-gray-400 font-mono">{gazeAngles}</span>
-                  )}
+                  <span className="flex items-center gap-1">
+                    <span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: eye.color }} />
+                    <span className="text-gray-600 font-medium">Eyes: {eye.label}</span>
+                  </span>
                 </>
               );
             })()}

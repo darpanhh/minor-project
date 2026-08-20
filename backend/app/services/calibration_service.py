@@ -36,6 +36,12 @@ HEAD_STORE_KEY = {
 class CalibrationService:
 
     def get_or_create(self, exam_session_id: str | uuid.UUID) -> Calibration:
+        if isinstance(exam_session_id, str):
+            try:
+                exam_session_id = uuid.UUID(exam_session_id)
+            except (ValueError, TypeError):
+                raise ValueError(f"Invalid UUID: {exam_session_id}")
+
         db = SessionLocal()
         try:
             cal = db.query(Calibration).filter(
@@ -64,9 +70,16 @@ class CalibrationService:
         exam_session_id: str | uuid.UUID,
         point_name: str,
         averaged_features: dict,
-    ) -> Calibration:
+    ) -> Calibration | None:
         if point_name not in CALIBRATION_POINTS:
             raise ValueError(f"Invalid calibration point: {point_name}")
+
+        if isinstance(exam_session_id, str):
+            try:
+                exam_session_id = uuid.UUID(exam_session_id)
+            except (ValueError, TypeError):
+                logger.error("Invalid UUID format: %s", exam_session_id)
+                return None
 
         db = SessionLocal()
         try:
@@ -110,7 +123,14 @@ class CalibrationService:
         finally:
             db.close()
 
-    def mark_completed(self, exam_session_id: str | uuid.UUID) -> Calibration:
+    def mark_completed(self, exam_session_id: str | uuid.UUID) -> Calibration | None:
+        if isinstance(exam_session_id, str):
+            try:
+                exam_session_id = uuid.UUID(exam_session_id)
+            except (ValueError, TypeError):
+                logger.error("Invalid UUID format: %s", exam_session_id)
+                return None
+
         db = SessionLocal()
         try:
             cal = db.query(Calibration).filter(

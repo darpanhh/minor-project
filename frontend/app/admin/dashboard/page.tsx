@@ -143,11 +143,11 @@ export default function AdminDashboard() {
             </div>
           ) : (
             <div className="space-y-3">
-              {sessions.slice(0, 5).map((s: any) => (
+              {sessions.slice(0, 8).map((s: any) => (
                 <Link
                   key={s.id}
                   href={`/admin/sessions/${s.id}`}
-                  className="flex items-center justify-between p-4 rounded-xl border border-border/70 bg-background/50 hover:bg-muted/30 hover:border-primary/40 transition-all gap-4 group"
+                  className="flex flex-col sm:flex-row sm:items-center justify-between p-4 rounded-xl border border-border/70 bg-background/50 hover:bg-muted/30 hover:border-primary/40 transition-all gap-4 group"
                 >
                   <div className="flex items-center gap-3.5 min-w-0">
                     <div
@@ -160,7 +160,7 @@ export default function AdminDashboard() {
                       }`}
                     />
                     <div className="min-w-0">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <span
                           className={`text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full ${
                             s.status === "in_progress"
@@ -173,14 +173,34 @@ export default function AdminDashboard() {
                           {s.status.replace(/_/g, " ")}
                         </span>
                         <span className="text-sm font-bold text-foreground truncate">{s.student_name}</span>
+                        {s.exam_title && (
+                          <span className="text-xs text-muted-foreground font-medium truncate">
+                            • {s.exam_title}
+                          </span>
+                        )}
                       </div>
-                      <p className="text-xs text-muted-foreground truncate mt-0.5">{s.student_email}</p>
+                      <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground">
+                        <p className="truncate">{s.student_email}</p>
+                        {s.event_count !== undefined && s.event_count > 0 ? (
+                          <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-600 bg-amber-500/10 px-2 py-0.5 rounded-md border border-amber-500/20">
+                            <span className="material-symbols-outlined text-xs">warning</span>
+                            <span>{s.event_count} Events ({s.snapshot_count || 0} Snapshots)</span>
+                          </span>
+                        ) : s.status === "registered" ? (
+                          <span className="text-[11px] text-muted-foreground italic">Not started yet</span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600 bg-emerald-500/10 px-2 py-0.5 rounded-md border border-emerald-500/20">
+                            <span className="material-symbols-outlined text-xs">verified</span>
+                            <span>No Violations</span>
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-3 shrink-0">
+                  <div className="flex items-center gap-3 shrink-0 self-end sm:self-auto">
                     <span className="text-xs font-extrabold text-foreground bg-muted px-2.5 py-1 rounded-lg border border-border">
-                      {s.final_score != null ? `${Math.round(s.final_score)}%` : s.score != null ? `${Math.round(s.score)}%` : "Pending"}
+                      {s.final_score != null ? `${Math.round(s.final_score)}%` : "Not released"}
                     </span>
                     <span className="material-symbols-outlined text-muted-foreground group-hover:text-primary transition-colors text-base">
                       chevron_right

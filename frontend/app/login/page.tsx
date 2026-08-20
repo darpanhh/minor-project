@@ -137,10 +137,7 @@ export default function LoginPage() {
         </div>
 
         {/* Footer info */}
-        <p className="text-xs text-center text-muted-foreground mt-6 flex items-center justify-center gap-1">
-          <span className="material-symbols-outlined text-sm text-emerald-500">verified_user</span>
-          <span>End-to-End AI Proctoring & Biometric Integrity</span>
-        </p>
+        
       </div>
     </div>
   );
