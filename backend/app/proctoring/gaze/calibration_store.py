@@ -68,6 +68,17 @@ class CalibrationStore:
     def sample_count(self, point):
         return len(self._samples.get(point, []))
 
+    def reset_point(self, point):
+        """Clear collected samples for a single point (re-capture)."""
+        if point in self._samples:
+            self._samples[point] = []
+        self._averages.pop(point, None)
+
+    def reset_all(self):
+        """Clear all collected samples — a fresh calibration attempt."""
+        self._samples = {p: [] for p in CALIBRATION_POINTS}
+        self._averages = {}
+
     def is_point_complete(self, point):
         return self.sample_count(point) >= SAMPLES_PER_POINT
 

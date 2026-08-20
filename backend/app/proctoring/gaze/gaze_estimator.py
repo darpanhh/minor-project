@@ -26,20 +26,9 @@ _DEFAULT_WEIGHTS = {
 }
 
 # Tolerance margin applied around the centre calibration point.
-#
-# The estimator first finds the closest calibration point (best point). If the
-# best point is an "away" zone but the current features are also close to the
-# centre point (i.e. distance_to_centre <= MARGIN_FACTOR * distance_to_best),
-# the point is treated as "centre" instead.
-#
-# This gives a comfortable buffer so that slightly looking up, down, left or
-# right of centre does NOT immediately get flagged as a gaze-away violation.
-# Only when the student clearly commits to an edge/away zone (a much larger
-# distance to centre than to the away point) does the violation trigger.
-#
-# With the 4-corner calibration grid, the virtual centre expands to ~60% of
-# the way toward any corner before a violation fires.
-MARGIN_FACTOR = 1.85
+# A buffer of 1.50 allows natural reading across different areas of the screen
+# (questions, sidebar, options) while accurately flagging true off-screen looking.
+MARGIN_FACTOR = 1.50
 
 
 class GazeEstimator:
@@ -185,24 +174,21 @@ class GazeEstimator:
 
     def compare_unsafe(self, current_features: dict) -> dict | None:
         """
-        Estimate gaze direction without calibration using raw head-pose YAW only.
-        Returns a coarse horizontal zone (center / middle_left / middle_right)
-        or None when yaw is unavailable.
-        """
-        yaw = current_features.get("yaw")
+        Estimate gaze direction without calibration from the iris-offset
+        metrics directly. Returns a coarse 3x3 zone (center / middle_left /
+        top_right / ...) or None when the eye metrics are unavailable.
 
-        if yaw is None:
+        The gaze estimate NEVER falls back to head yaw — the eyes can look in
+        one direction while the head stays centered.
+        """
+        from .directions import eye_zone
+
+        point = eye_zone(current_features)
+        if point == "unknown":
             return None
 
-        if yaw > 28:
-            zone = "middle_left"
-        elif yaw < -28:
-            zone = "middle_right"
-        else:
-            zone = "center"
-
         return {
-            "point": zone,
+            "point": point,
             "confidence": 0.5,
             "distances": {},
             "all_scores": [],

@@ -36,30 +36,7 @@ export default function StudentDashboard() {
     <ProtectedRoute role="student">
       <div className="space-y-8 animate-fade-in">
         {/* Welcome Banner */}
-        <div className="relative overflow-hidden bg-gradient-to-br from-primary via-blue-600 to-indigo-700 text-white rounded-3xl p-6 sm:p-8 shadow-xl shadow-primary/10">
-          <div className="absolute right-0 top-0 bottom-0 w-1/3 bg-white/5 skew-x-12 pointer-events-none" />
-          <div className="relative z-10 max-w-2xl">
-            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/10 backdrop-blur-md text-xs font-semibold uppercase tracking-wider mb-3 border border-white/20">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              Student Examination Portal
-            </span>
-            <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight">
-              Welcome back to VisionProctor
-            </h1>
-            <p className="text-white/80 text-sm mt-2 leading-relaxed">
-              Your AI-proctored examination hub. Take scheduled tests, review verified scores, and verify your calibration status.
-            </p>
-            <div className="mt-6 flex flex-wrap gap-3">
-              <Link
-                href="/student/exams"
-                className="px-5 py-2.5 bg-white text-slate-900 font-semibold rounded-xl text-sm transition hover:bg-slate-100 shadow-lg flex items-center gap-2"
-              >
-                <span>Browse Available Exams</span>
-                <span className="material-symbols-outlined text-lg">arrow_forward</span>
-              </Link>
-            </div>
-          </div>
-        </div>
+        
 
         {/* Stats Grid */}
         {loading ? (
@@ -94,15 +71,7 @@ export default function StudentDashboard() {
               <p className="text-xs font-medium text-muted-foreground mt-1">Completed Sessions</p>
             </div>
 
-            <div className="bg-card border border-border/80 rounded-2xl p-5 shadow-sm hover:shadow-md transition-shadow">
-              <div className="w-11 h-11 rounded-xl bg-purple-500/10 text-purple-600 flex items-center justify-center mb-3">
-                <span className="material-symbols-outlined text-xl">analytics</span>
-              </div>
-              <p className="text-3xl font-extrabold text-foreground">
-                {avgScoreDisplay !== null ? `${avgScoreDisplay}%` : "—"}
-              </p>
-              <p className="text-xs font-medium text-muted-foreground mt-1">Average Score</p>
-            </div>
+  
           </div>
         )}
 
@@ -165,7 +134,7 @@ export default function StudentDashboard() {
                           s.result_status === "reviewed" && s.final_score != null ? (
                             <span className="text-xs font-extrabold text-foreground">Score: {Math.round(s.final_score)}%</span>
                           ) : (
-                            <span className="text-xs font-medium text-amber-600">Verification Pending</span>
+                            <span className="text-xs font-medium text-muted-foreground">Result will be published by admin</span>
                           )
                         )}
                       </div>

@@ -61,9 +61,10 @@ export default function AdminSessionsPage() {
                 <thead>
                   <tr className="border-b border-slate-100 bg-slate-50/50">
                     <th className="text-left py-3.5 px-5 text-xs font-medium text-slate-500 uppercase tracking-wide">Student</th>
-                    <th className="text-left py-3.5 px-5 text-xs font-medium text-slate-500 uppercase tracking-wide">Email</th>
+                    <th className="text-left py-3.5 px-5 text-xs font-medium text-slate-500 uppercase tracking-wide">Exam</th>
                     <th className="text-left py-3.5 px-5 text-xs font-medium text-slate-500 uppercase tracking-wide">Status</th>
-                    <th className="text-left py-3.5 px-5 text-xs font-medium text-slate-500 uppercase tracking-wide">Score</th>
+                    <th className="text-left py-3.5 px-5 text-xs font-medium text-slate-500 uppercase tracking-wide">Violations</th>
+                    <th className="text-left py-3.5 px-5 text-xs font-medium text-slate-500 uppercase tracking-wide">Final Score</th>
                     <th className="text-left py-3.5 px-5 text-xs font-medium text-slate-500 uppercase tracking-wide">Result</th>
                     <th className="text-left py-3.5 px-5 text-xs font-medium text-slate-500 uppercase tracking-wide">Date</th>
                     <th className="py-3.5 px-5" />
@@ -73,14 +74,31 @@ export default function AdminSessionsPage() {
                   {sessions.map((s: any, idx: number) => (
                     <tr key={s.id} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors" style={{ animationDelay: `${idx * 0.03}s` }}>
                       <td className="py-3.5 px-5">
-                        <span className="text-sm font-medium text-slate-900">{s.student_name}</span>
+                        <div>
+                          <p className="text-sm font-medium text-slate-900">{s.student_name}</p>
+                          <p className="text-xs text-slate-500">{s.student_email}</p>
+                        </div>
                       </td>
-                      <td className="py-3.5 px-5 text-sm text-slate-600">{s.student_email}</td>
+                      <td className="py-3.5 px-5 text-sm text-slate-700 font-medium">
+                        {s.exam_title || "Exam"}
+                      </td>
                       <td className="py-3.5 px-5">
                         <span className={`status-badge ${statusColor(s.status)}`}>{s.status.replace(/_/g, " ")}</span>
                       </td>
-                      <td className="py-3.5 px-5 text-sm text-slate-700">
-                        {s.final_score != null ? `${Math.round(s.final_score)}%` : s.score != null ? `${Math.round(s.score)}%` : "—"}
+                      <td className="py-3.5 px-5">
+                        {s.event_count !== undefined && s.event_count > 0 ? (
+                          <span className="inline-flex items-center gap-1 text-xs font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                            {s.event_count} ({s.snapshot_count || 0} snap)
+                          </span>
+                        ) : s.status === "registered" ? (
+                          <span className="text-xs text-slate-400 italic">Not started</span>
+                        ) : (
+                          <span className="text-xs text-emerald-600 font-medium">Clean</span>
+                        )}
+                      </td>
+                      <td className="py-3.5 px-5 text-sm text-slate-700 font-bold">
+                        {s.final_score != null ? `${Math.round(s.final_score)}%` : "—"}
                       </td>
                       <td className="py-3.5 px-5">
                         <span className={`text-xs font-medium ${s.result_status === "reviewed" ? "text-emerald-600" : "text-amber-600"}`}>
@@ -88,14 +106,18 @@ export default function AdminSessionsPage() {
                         </span>
                       </td>
                       <td className="py-3.5 px-5 text-xs text-slate-400">
-                        {s.started_at ? new Date(s.started_at).toLocaleDateString() : "—"}
+                        {s.submitted_at
+                          ? new Date(s.submitted_at).toLocaleDateString()
+                          : s.started_at
+                          ? new Date(s.started_at).toLocaleDateString()
+                          : "—"}
                       </td>
                       <td className="py-3.5 px-5 text-right">
                         <Link
                           href={`/admin/sessions/${s.id}`}
                           className="btn-ghost text-xs !py-1.5"
                         >
-                          View Details
+                          View Report
                         </Link>
                       </td>
                     </tr>

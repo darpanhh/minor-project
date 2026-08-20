@@ -4,27 +4,6 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { api } from "@/src/services/api";
 import { useAuth } from "@/src/contexts/AuthContext";
-// Local fallback Button to avoid missing import during verification
-function Button({
-  children,
-  className = "",
-  disabled,
-  onClick,
-}: React.PropsWithChildren<{
-  className?: string;
-  disabled?: boolean;
-  onClick?: () => void;
-}>) {
-  return (
-    <button
-      className={`btn ${className}`}
-      disabled={disabled}
-      onClick={onClick}
-    >
-      {children}
-    </button>
-  );
-}
 
 interface CalibrationPoint {
   id: string;
@@ -76,6 +55,9 @@ export default function VerifyPage() {
   const [points, setPoints] = useState<CalibrationPoint[]>(EYE_CALIBRATION_POINTS);
   const [calibrationPointIndex, setCalibrationPointIndex] = useState(0);
   const [capturedFrames, setCapturedFrames] = useState(0);
+  const [samplesCollected, setSamplesCollected] = useState(0);
+  const [pointComplete, setPointComplete] = useState(false);
+  const [noFaceHint, setNoFaceHint] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -87,6 +69,15 @@ export default function VerifyPage() {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const calibratingRef = useRef(true);
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Queue a reset_all for the moment the socket finishes opening (the socket
+  // is briefly CONNECTING right after the eye → head phase switch).
+  const pendingResetRef = useRef(false);
+  // Latest point id, mirrored in a ref so the WS onmessage handler always
+  // sees the point currently being captured (no stale closure).
+  const currentPointIdRef = useRef(points[calibrationPointIndex]?.id ?? "");
+  useEffect(() => {
+    currentPointIdRef.current = points[calibrationPointIndex]?.id ?? "";
+  });
 
   // ── Track fullscreen state ─────────────────────────────────────
   useEffect(() => {
@@ -175,6 +166,8 @@ export default function VerifyPage() {
   }, [session?.id, params.id]);
 
   // ── Connect WebSocket on calibration start (eye + head) ────────
+  const calibrationAckRef = useRef<{ point_complete?: boolean }>({});
+
   useEffect(() => {
     if (phase !== "calibration" && phase !== "head") return;
     calibratingRef.current = true;
@@ -183,7 +176,37 @@ export default function VerifyPage() {
     wsRef.current = ws;
 
     ws.onerror = () => console.error("Calibration WS error");
-    ws.onopen = () => console.log("Calibration WS connected");
+    ws.onopen = () => {
+      console.log("Calibration WS connected");
+      if (pendingResetRef.current) {
+        pendingResetRef.current = false;
+        ws.send(JSON.stringify({ type: "reset_all" }));
+      }
+    };
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.point_complete != null) {
+          // Only accept acks for the point currently being captured — a
+          // stale ack for a different point must never advance the UI.
+          if (!msg.point || msg.point === currentPointIdRef.current) {
+            calibrationAckRef.current = msg;
+            setPointComplete(!!msg.point_complete);
+            if (typeof msg.samples_collected === "number") {
+              setSamplesCollected(msg.samples_collected);
+              // A frame was accepted — the face IS detected; drop the hint.
+              setNoFaceHint(false);
+            }
+          }
+        } else if (msg.success === false) {
+          // Backend tells us it could not find a face in the frame — let the
+          // student adjust instead of silently failing the capture.
+          setNoFaceHint(true);
+        }
+      } catch {
+        // ignore malformed messages
+      }
+    };
 
     return () => {
       calibratingRef.current = false;
@@ -194,16 +217,46 @@ export default function VerifyPage() {
 
   // ── Capture frames for the current point ───────────────────────
   async function captureCurrentPoint() {
+    const token = ++captureTokenRef.current;
     const ws = wsRef.current;
     const video = videoRef.current;
-    if (!ws || !video || ws.readyState !== WebSocket.OPEN) return;
+    if (!ws || !video) return;
 
-    setCapturing(true);
+    // The calibration socket may still be CONNECTING right after a phase
+    // transition (eye → head) — give it a short window to open before
+    // giving up, instead of silently doing nothing.
+    if (ws.readyState !== WebSocket.OPEN) {
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        if (wsRef.current?.readyState === WebSocket.OPEN) break;
+      }
+      if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+    }
+
+setCapturing(true);
     setCapturedFrames(0);
+    setSamplesCollected(0);
+    setPointComplete(false);
+    setNoFaceHint(false);
+    calibrationAckRef.current = {};
+
+    // Fresh capture for this point — drop any samples collected earlier.
+    ws.send(
+      JSON.stringify({
+        type: "reset",
+        point: points[calibrationPointIndex].id,
+      })
+    );
 
     let framesCaptured = 0;
-    for (let f = 0; f < FRAMES_PER_POINT; f++) {
-      if (!calibratingRef.current) return;
+    // Keep sending frames until the server confirms 20 valid samples were
+    // stored (frames without a detectable face are discarded server-side).
+    // The ack is checked BEFORE sending each frame, so we never send or
+    // display a frame past completion (no more "21/20").
+    const MAX_CAPTURE_FRAMES = 120;
+    for (let f = 1; f <= MAX_CAPTURE_FRAMES; f++) {
+      if (!calibratingRef.current || captureTokenRef.current !== token) return;
+      if (calibrationAckRef.current.point_complete) break;
       const captureCanvas = document.createElement("canvas");
       captureCanvas.width = video.videoWidth || 640;
       captureCanvas.height = video.videoHeight || 480;
@@ -213,25 +266,36 @@ export default function VerifyPage() {
         ws.send(
           JSON.stringify({
             point: points[calibrationPointIndex].id,
-            frame_number: f + 1,
+            frame_number: f,
             frame: captureCanvas.toDataURL("image/jpeg", 0.6),
           })
         );
       }
-      framesCaptured = f + 1;
+      framesCaptured = Math.min(f, FRAMES_PER_POINT);
       setCapturedFrames(framesCaptured);
       await new Promise((r) => setTimeout(r, CAPTURE_INTERVAL_MS));
     }
+    // Settle: the backend may still be processing the frames we just sent —
+    // give it a moment for the final ack (and the 20th sample) to arrive
+    // before deciding the capture was incomplete.
+    for (let i = 0; i < 20 && !calibrationAckRef.current.point_complete; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (captureTokenRef.current !== token) return;
     setCapturing(false);
+    setNoFaceHint(false);
     // Incomplete capture — require a fresh recording.
-    if (framesCaptured < FRAMES_PER_POINT) {
+    if (!calibrationAckRef.current.point_complete) {
       setCapturedFrames(0);
+      setSamplesCollected(0);
     }
   }
 
   // ── 3-2-1 countdown, then automatically capture ────────────────
   const beginCapture = () => {
     setCapturedFrames(0);
+    setSamplesCollected(0);
+    setPointComplete(false);
     setCountdown(COUNTDOWN_SECONDS);
     if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
     countdownTimerRef.current = setInterval(() => {
@@ -240,9 +304,18 @@ export default function VerifyPage() {
   };
 
   const captureCurrentPointRef = useRef<() => Promise<void>>(async () => {});
+  // Abort any in-flight capture loop (Restart / Next Point safety).
+  const abortCapture = () => {
+    captureTokenRef.current++;
+    setCapturing(false);
+  };
   useEffect(() => {
     captureCurrentPointRef.current = captureCurrentPoint;
   });
+
+  // Monotonic token — bumping it aborts any in-flight capture loop so the
+  // Restart button always works, even mid-recording.
+  const captureTokenRef = useRef(0);
 
   useEffect(() => {
     if (countdown === null) return;
@@ -272,6 +345,10 @@ export default function VerifyPage() {
   };
 
   function nextPoint() {
+    abortCapture();
+    calibrationAckRef.current = {};
+    setSamplesCollected(0);
+    setPointComplete(false);
     const next = calibrationPointIndex + 1;
     if (next >= points.length) {
       if (phase === "calibration") {
@@ -307,12 +384,25 @@ export default function VerifyPage() {
   };
 
   // Restart the current phase from its FIRST point (not just the current one).
+  // Works at any time — recording, countdown, or done — by aborting any
+  // in-flight capture loop.
   const restartPoints = () => {
-    if (capturing) return;
+    abortCapture();
     setPoints(phase === "head" ? HEAD_CALIBRATION_POINTS : EYE_CALIBRATION_POINTS);
     setCalibrationPointIndex(0);
     setCapturedFrames(0);
+    setSamplesCollected(0);
+    setPointComplete(false);
     setCountdown(null);
+    calibrationAckRef.current = {};
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "reset_all" }));
+    } else if (ws) {
+      // Socket still connecting (right after a phase switch) — send the
+      // reset as soon as it opens.
+      pendingResetRef.current = true;
+    }
     if (countdownTimerRef.current) {
       clearInterval(countdownTimerRef.current);
       countdownTimerRef.current = null;
@@ -498,19 +588,24 @@ export default function VerifyPage() {
                 <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-3 pointer-events-none">
                   <div className="flex items-center gap-2.5 text-white font-bold text-lg">
                     <div className="w-5 h-5 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin" />
-                    Recording gaze data ({capturedFrames}/{FRAMES_PER_POINT})...
+                    Recording gaze data ({samplesCollected > 0 ? samplesCollected : capturedFrames}/{FRAMES_PER_POINT})...
                   </div>
+                  {noFaceHint && (
+                    <div className="rounded-xl bg-red-500/20 border border-red-400/40 text-red-300 px-4 py-2 text-sm font-semibold text-center max-w-xs">
+                      Face not detected — look straight at the camera and stay still.
+                    </div>
+                  )}
                   <div className="w-64 bg-slate-800 rounded-full h-2 overflow-hidden">
                     <div
                       className="bg-gradient-to-r from-blue-500 to-cyan-400 h-full transition-all duration-200"
-                      style={{ width: `${(capturedFrames / FRAMES_PER_POINT) * 100}%` }}
+                      style={{ width: `${Math.min(100, (capturedFrames / FRAMES_PER_POINT) * 100)}%` }}
                     />
                   </div>
                 </div>
               )}
 
               {/* Done overlay (centre) */}
-              {!capturing && (countdown === null || countdown <= 0) && capturedFrames >= FRAMES_PER_POINT && (
+              {!capturing && (countdown === null || countdown <= 0) && pointComplete && (
                 <div className="absolute inset-0 z-40 flex items-center justify-center pointer-events-none">
                   <div className="bg-emerald-600/20 border border-emerald-400/40 text-emerald-400 rounded-2xl px-8 py-4 font-bold text-lg flex items-center gap-2.5 shadow-2xl">
                     <span className="material-symbols-outlined text-2xl">check_circle</span>
@@ -524,7 +619,7 @@ export default function VerifyPage() {
                 <div className="flex items-center justify-between w-full text-xs text-slate-400 px-1">
                   <span>Eye calibration · Point {calibrationPointIndex + 1} of {points.length} ({currentPoint?.label})</span>
                   <div className="flex items-center gap-3">
-                    <span>{capturedFrames}/{FRAMES_PER_POINT} frames</span>
+<span>{samplesCollected > 0 ? samplesCollected : capturedFrames}/{FRAMES_PER_POINT} frames</span>
                     <button
                       onClick={restartPoints}
                       className="text-slate-400 hover:text-white flex items-center gap-1 transition"
@@ -554,7 +649,7 @@ export default function VerifyPage() {
                     <div className="w-full py-2.5 text-center text-xs text-slate-400">
                       Capturing in progress…
                     </div>
-                  ) : capturedFrames >= FRAMES_PER_POINT ? (
+                  ) : pointComplete ? (
                     <>
                       <button
                         onClick={retryPoint}
@@ -661,16 +756,21 @@ export default function VerifyPage() {
                   <div className="w-full py-3 bg-slate-50 border border-border rounded-xl flex flex-col items-center justify-center gap-2.5">
                     <div className="flex items-center justify-center gap-2 text-sm font-semibold text-slate-700">
                       <div className="w-4 h-4 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin" />
-                      <span>Recording head pose ({capturedFrames}/{FRAMES_PER_POINT})...</span>
+                      <span>Recording head pose ({samplesCollected > 0 ? samplesCollected : capturedFrames}/{FRAMES_PER_POINT})...</span>
                     </div>
+                    {noFaceHint && (
+                      <div className="rounded-xl bg-red-50 border border-red-300 text-red-600 px-4 py-2 text-xs font-semibold text-center max-w-xs">
+                        Turn your head less — keep your face visible to the camera.
+                      </div>
+                    )}
                     <div className="w-64 bg-muted rounded-full h-2 overflow-hidden">
                       <div
                         className="bg-gradient-to-r from-blue-500 to-cyan-400 h-full transition-all duration-200"
-                        style={{ width: `${(capturedFrames / FRAMES_PER_POINT) * 100}%` }}
+                        style={{ width: `${Math.min(100, (capturedFrames / FRAMES_PER_POINT) * 100)}%` }}
                       />
                     </div>
                   </div>
-                ) : capturedFrames >= FRAMES_PER_POINT ? (
+                ) : pointComplete ? (
                   <>
                     <div className="w-full py-3 bg-emerald-100 border border-emerald-300 text-emerald-700 rounded-xl text-sm font-bold flex items-center justify-center gap-2">
                       <span className="material-symbols-outlined text-base">check_circle</span>
@@ -710,70 +810,95 @@ export default function VerifyPage() {
 
       {/* ── Phase: complete ──────────────────────────────────────── */}
       {phase === "complete" && (
-        <>
-          <div>
-            <h2 className="text-2xl font-bold">Calibration Complete</h2>
-            <p className="text-muted-foreground">
-              Your gaze tracking has been calibrated. You can now
-              start the exam.
-            </p>
-          </div>
+        <section className="relative overflow-hidden rounded-3xl border border-emerald-200/80 bg-card shadow-xl shadow-emerald-950/5">
+          <div className="absolute inset-x-0 top-0 h-40 bg-gradient-to-br from-emerald-500/15 via-cyan-400/10 to-transparent" />
+          <div className="absolute -right-16 -top-20 h-56 w-56 rounded-full bg-emerald-400/15 blur-3xl" />
 
-          <div className="bg-card border border-border rounded-xl p-6">
-            <div className="flex items-center gap-3 mb-6 p-4 bg-primary/10 rounded-lg border border-primary/20">
-              <span className="material-symbols-outlined text-primary text-3xl">
-                check_circle
-              </span>
-              <div>
-                <p className="font-medium text-primary">
-                  Calibration Complete
-                </p>
-                <p className="text-sm text-muted-foreground">
-                  All 4 eye and 3 head calibration points have been recorded
-                  successfully.
-                </p>
+          <div className="relative px-6 py-8 sm:px-10 sm:py-10">
+            <div className="mx-auto max-w-2xl text-center">
+              <div className="mx-auto mb-5 flex h-20 w-20 items-center justify-center rounded-3xl border border-emerald-300 bg-emerald-100 text-emerald-600 shadow-lg shadow-emerald-500/20">
+                <span className="material-symbols-outlined text-5xl">check_circle</span>
+              </div>
+              <p className="mb-2 text-xs font-bold uppercase tracking-[0.2em] text-emerald-700">
+                Setup complete
+              </p>
+              <h2 className="text-3xl font-bold tracking-tight text-foreground sm:text-4xl">
+                Calibration complete
+              </h2>
+              <p className="mx-auto mt-3 max-w-lg text-sm leading-relaxed text-muted-foreground sm:text-base">
+                Your eye tracking and head-pose profile are ready. You&apos;re all set to begin your exam.
+              </p>
+            </div>
+
+            <div className="mx-auto mt-8 grid max-w-2xl grid-cols-1 gap-3 sm:grid-cols-3">
+              <div className="rounded-2xl border border-border/80 bg-background/70 p-4 text-center shadow-sm">
+                <span className="material-symbols-outlined text-2xl text-blue-600">visibility</span>
+                <p className="mt-1 text-lg font-bold text-foreground">4 / 4</p>
+                <p className="text-xs font-medium text-muted-foreground">Eye points captured</p>
+              </div>
+              <div className="rounded-2xl border border-border/80 bg-background/70 p-4 text-center shadow-sm">
+                <span className="material-symbols-outlined text-2xl text-cyan-600">face</span>
+                <p className="mt-1 text-lg font-bold text-foreground">3 / 3</p>
+                <p className="text-xs font-medium text-muted-foreground">Head poses captured</p>
+              </div>
+              <div className="rounded-2xl border border-border/80 bg-background/70 p-4 text-center shadow-sm">
+                <span className="material-symbols-outlined text-2xl text-emerald-600">verified</span>
+                <p className="mt-1 text-lg font-bold text-foreground">Ready</p>
+                <p className="text-xs font-medium text-muted-foreground">Proctoring enabled</p>
               </div>
             </div>
 
-            <Button
-              className="w-full"
-              disabled={starting}
-              onClick={async () => {
-                if (!session || starting) return;
-                setStarting(true);
-                try {
-                  // Enter fullscreen from within this user gesture — Chrome
-                  // rejects requestFullscreen() outside a gesture, and the
-                  // exam page mounts already in fullscreen after navigation.
-                  if (!document.fullscreenElement) {
-                    try {
-                      await document.documentElement.requestFullscreen();
-                    } catch (err) {
-                      console.error("Fullscreen request failed:", err);
+            <div className="mx-auto mt-7 max-w-2xl rounded-2xl border border-primary/15 bg-primary/5 px-4 py-3 text-left sm:flex sm:items-center sm:gap-3">
+              <span className="material-symbols-outlined mb-1 block text-primary sm:mb-0">info</span>
+              <p className="text-sm text-muted-foreground">
+                Starting the exam opens it in fullscreen mode. Keep your camera on and stay in the exam tab.
+              </p>
+            </div>
+
+            <div className="mx-auto mt-7 flex max-w-2xl flex-col gap-3 sm:flex-row-reverse">
+              <button
+                className="flex-1 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 px-5 py-3 text-sm font-bold text-white shadow-lg shadow-blue-500/25 transition hover:from-blue-500 hover:to-cyan-400 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={starting}
+                onClick={async () => {
+                  if (!session || starting) return;
+                  setStarting(true);
+                  try {
+                    // Enter fullscreen from within this user gesture — Chrome
+                    // rejects requestFullscreen() outside a gesture, and the
+                    // exam page mounts already in fullscreen after navigation.
+                    if (!document.fullscreenElement) {
+                      try {
+                        await document.documentElement.requestFullscreen();
+                      } catch (err) {
+                        console.error("Fullscreen request failed:", err);
+                      }
                     }
+                    await api.startSession(session.id);
+                    router.push(`/student/exams/${params.id}`);
+                  } catch (err: any) {
+                    console.error("Failed to start session:", err);
+                    setStarting(false);
                   }
-                  await api.startSession(session.id);
-                  router.push(`/student/exams/${params.id}`);
-                } catch (err: any) {
-                  console.error("Failed to start session:", err);
-                  setStarting(false);
-                }
-              }}
-            >
-              <span>{starting ? "Starting..." : "Start Exam"}</span>
-              <span className="material-symbols-outlined ml-2">
-                arrow_forward
-              </span>
-            </Button>
-            <Button
-              className="w-full mt-3"
-              onClick={restartCalibration}
-            >
-              <span className="material-symbols-outlined mr-2">replay</span>
-              Recalibrate
-            </Button>
+                }}
+              >
+                <span className="inline-flex items-center justify-center gap-2">
+                  {starting ? "Starting exam..." : "Start exam"}
+                  {!starting && <span className="material-symbols-outlined text-base">arrow_forward</span>}
+                </span>
+              </button>
+              <button
+                className="rounded-xl border border-border bg-background px-5 py-3 text-sm font-semibold text-foreground transition hover:bg-muted sm:w-auto"
+                disabled={starting}
+                onClick={restartCalibration}
+              >
+                <span className="inline-flex items-center justify-center gap-2">
+                  <span className="material-symbols-outlined text-base">replay</span>
+                  Recalibrate
+                </span>
+              </button>
+            </div>
           </div>
-        </>
+        </section>
       )}
     </div>
   );

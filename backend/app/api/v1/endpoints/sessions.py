@@ -116,23 +116,32 @@ def submit_session(
         raise HTTPException(status_code=404, detail="Session not found")
     if session.student_id != student.id:
         raise HTTPException(status_code=403, detail="Not your session")
-    if session.status != SessionStatus.in_progress:
-        raise HTTPException(status_code=400, detail="Session is not in progress")
+    if session.status == SessionStatus.submitted:
+        return session
+    if session.status not in (SessionStatus.in_progress, SessionStatus.registered):
+        raise HTTPException(status_code=400, detail="Session cannot be submitted in its current state")
 
     exam = db.query(Exam).filter(Exam.id == session.exam_id).first()
     correct = 0
-    total = len(exam.questions)
-    for i, q in enumerate(exam.questions):
+    questions = exam.questions if exam and exam.questions else []
+    if isinstance(questions, dict):
+        questions = list(questions.values())
+
+    total = len(questions)
+    for i, q in enumerate(questions):
         key = str(i)
-        if key in payload.answers and payload.answers[key] == q.get("correct_answer"):
+        if isinstance(q, dict) and key in payload.answers and payload.answers[key] == q.get("correct_answer"):
             correct += 1
 
     session.answers = payload.answers
     session.score = (correct / total * 100) if total > 0 else 0
+    # AUTO-GRADE on submit: the computed score (unanswered counts as wrong)
+    # becomes the default final result. A student who answers nothing is 0%,
+    # never 100%. Admins may still override when releasing the result.
+    session.final_score = session.score
     session.status = SessionStatus.submitted
     session.submitted_at = datetime.now(timezone.utc)
     session.result_status = ResultStatus.pending
-    session.final_score = None
     db.commit()
 
     db.refresh(session)

@@ -5,10 +5,11 @@ from collections import deque
 from .mediapipe_detector import MediaPipeDetector
 from .feature_extractor import FeatureExtractor
 from .gaze_estimator import GazeEstimator
+from .directions import head_direction, eye_zone, eye_zone_calibrated, zone_to_direction
 
 logger = logging.getLogger(__name__)
 
-_SMOOTHING_BUFFER_SIZE = 3
+_SMOOTHING_BUFFER_SIZE = 5
 
 # Startup grace: ignore all gaze/head violations for the first N seconds of a
 # session so students settling in (adjusting posture, camera warmup, etc.)
@@ -22,13 +23,8 @@ _AWAY_ZONES = {
 }
 
 # Head-turn (yaw-only) threshold in degrees. Used when no calibrated head
-# profile is available for the session.
-_HEAD_TURN_YAW_THRESHOLD = 30.0
-
-# When a calibrated head profile is available, a HEAD_TURN is flagged when the
-# yaw deviates from the calibrated "forward" yaw by more than the maximum
-# calibrated left/right turn plus this margin (degrees).
-_HEAD_TURN_CALIB_MARGIN = 5.0
+# profile is available for the session (22° indicates head clearly turned away from screen).
+_HEAD_TURN_YAW_THRESHOLD = 22.0
 
 
 class GazeService:
@@ -63,11 +59,18 @@ class GazeService:
         self._face_detected: bool = False
         self._frame_timestamp: float = 0.0
 
+        # Track consecutive no-face frames so single-frame flicker does NOT
+        # clear the smoothing buffer and reset violation state.
+        self._no_face_streak: int = 0
+        # Face must be absent for this many consecutive gaze frames before the
+        # buffer is cleared (prevents MediaPipe flicker from resetting gaze).
+        self._NO_FACE_CLEAR_THRESHOLD: int = 3
+
         self._frame_count: int = 0
         self._started_at: float | None = None
         self._violations: dict[str, dict] = {
-            "GAZE_AWAY": {"active": False, "start": None},
-            "HEAD_TURN": {"active": False, "start": None},
+            "GAZE_AWAY": {"active": False, "start": None, "confidence": 0.0},
+            "HEAD_TURN": {"active": False, "start": None, "confidence": 0.0},
         }
 
     # ------------------------------------------------------------------
@@ -89,8 +92,10 @@ class GazeService:
         if not face:
             self._face_detected = False
             self._current_features = None
+            self._no_face_streak += 1
             self._handle_no_face()
             return self._build_result()
+        self._no_face_streak = 0
 
         self._face_detected = True
 
@@ -116,27 +121,32 @@ class GazeService:
         return self._started_at is not None and now - self._started_at < _STARTUP_GRACE_SEC
 
     def _handle_no_face(self) -> None:
-        self._clear_violations()
-        self._buffer.clear()
-        self._smoothed_point = None
-        self._smoothed_confidence = 0.0
-        self._last_raw_point = None
-        self._last_raw_confidence = 0.0
+        # When face is absent (e.g. turned away from camera), do NOT clear
+        # active violations — turning away from camera is a violation!
+        # Only clear the landmark feature buffer after extended absence.
+        if self._no_face_streak >= 30:  # ~3 seconds
+            self._buffer.clear()
+            self._smoothed_point = None
+            self._smoothed_confidence = 0.0
+            self._last_raw_point = None
+            self._last_raw_confidence = 0.0
 
     def _run_gaze_estimation(self, features: dict) -> None:
-        # Use the calibrated profile to compare when available, otherwise fall
-        # back to raw yaw thresholds.
+        # Away-detection uses the iris offsets RELATIVE to the student's
+        # calibrated on-screen region (or absolute offsets when uncalibrated).
+        # Real iris movement is tiny, so absolute 0.5-based thresholds never
+        # fire; the calibrated corners define what "on screen" means per user.
         if self.calibration_profile:
+            raw_point = eye_zone_calibrated(features, self.calibration_profile)
             est = self.estimator.compare(self.calibration_profile, features)
         else:
+            raw_point = eye_zone(features)
             est = self.estimator.compare_unsafe(features) or {
                 "point": "unknown",
                 "confidence": 0.0,
                 "distances": {},
                 "all_scores": [],
             }
-
-        raw_point = est["point"]
         raw_conf = est["confidence"]
         self._last_raw_point = raw_point
         self._last_raw_confidence = raw_conf
@@ -179,26 +189,49 @@ class GazeService:
             return
 
         active_violations: set[str] = set()
+        violation_confs: dict[str, float] = {}
         yaw = self._current_features.get("yaw") if self._current_features else None
 
         # ── GAZE_AWAY ──────────────────────────────────────────────
-        # Require buffer consensus (at least 2 away-zone votes out of 3 frames)
-        if len(self._buffer) >= _SMOOTHING_BUFFER_SIZE:
+        # Use proportional voting so partial buffers are not silently ignored.
+        # Threshold: requires at least 3 away-votes out of a 5-frame buffer (>=60%),
+        # so brief glances or marginal iris measurements do not trigger false
+        # positives, while genuine off-screen looks are still caught.
+        buf_len = len(self._buffer)
+        away_votes = 0
+        if buf_len >= 3:
             away_votes = sum(1 for item in self._buffer if item.get("point") in _AWAY_ZONES)
-            if away_votes >= 2:
+            required_votes = max(2, (buf_len * 3 + 4) // 5)
+            if away_votes >= required_votes:
                 active_violations.add("GAZE_AWAY")
+                # Confidence = fraction of buffer frames that are in away zones
+                violation_confs["GAZE_AWAY"] = away_votes / buf_len
 
-        # Forced clear: if smoothed prediction or current raw prediction
-        # is "center", the gaze is back on screen — drop the violation.
-        if (self._smoothed_point == "center" or self._last_raw_point == "center") and yaw is not None and abs(yaw) < 22:
+        # Forced clear: if the smoothed prediction is "center",
+        # the eyes are back on the screen — drop the violation so
+        # it clears as soon as the student looks back.
+        if self._smoothed_point == "center":
             active_violations.discard("GAZE_AWAY")
+            violation_confs.pop("GAZE_AWAY", None)
+
+        logger.debug(
+            "Gaze violations check: buf_len=%d away_votes=%s HEAD_TURN=%s yaw=%s",
+            buf_len,
+            away_votes,
+            yaw is not None and self._is_head_turn(yaw),
+            f"{yaw:.1f}" if yaw is not None else None,
+        )
 
         # ── HEAD_TURN (yaw only — no pitch / roll) ─────────────────
         if yaw is not None and self._is_head_turn(yaw):
             active_violations.add("HEAD_TURN")
+            # Confidence = how far past the threshold the yaw is
+            violation_confs["HEAD_TURN"] = self._head_turn_confidence(yaw)
 
-        self._update_violation_state("GAZE_AWAY", "GAZE_AWAY" in active_violations, now)
-        self._update_violation_state("HEAD_TURN", "HEAD_TURN" in active_violations, now)
+        self._update_violation_state("GAZE_AWAY", "GAZE_AWAY" in active_violations, now,
+                                     violation_confs.get("GAZE_AWAY", 0.0))
+        self._update_violation_state("HEAD_TURN", "HEAD_TURN" in active_violations, now,
+                                     violation_confs.get("HEAD_TURN", 0.0))
 
     def _is_head_turn(self, yaw: float) -> bool:
         head = self._head_profile or {}
@@ -207,17 +240,52 @@ class GazeService:
         right = (head.get("right") or {}).get("yaw")
 
         if forward is not None and left is not None and right is not None:
-            max_turn = max(abs(left - forward), abs(right - forward))
-            return abs(yaw - forward) > max_turn + _HEAD_TURN_CALIB_MARGIN
+            deviation = yaw - forward
+            # Positive yaw = turned to the student's RIGHT, negative = LEFT.
+            # Use the calibrated turn size for the SAME side so a small
+            # calibration on one side doesn't inflate the other's threshold.
+            side = right if deviation > 0 else left
+            threshold = max(20.0, abs(side - forward) * 0.70)
+            return abs(deviation) > threshold
 
         return abs(yaw) > _HEAD_TURN_YAW_THRESHOLD
 
-    def _update_violation_state(self, vtype: str, is_active: bool, now: float) -> None:
+    def _head_turn_confidence(self, yaw: float) -> float:
+        """Compute confidence for a head-turn violation (0..1).
+
+        The confidence represents how far past the threshold the yaw is,
+        clamped to [0, 1].  1.0 means the head is fully turned to the
+        calibrated extremes; 0.5 means it is halfway past threshold.
+        """
+        head = self._head_profile or {}
+        forward = (head.get("forward") or {}).get("yaw")
+        left = (head.get("left") or {}).get("yaw")
+        right = (head.get("right") or {}).get("yaw")
+
+        if forward is not None and left is not None and right is not None:
+            deviation = yaw - forward
+            side = right if deviation > 0 else left
+            threshold = max(14.0, abs(side - forward) * 0.6)
+        else:
+            threshold = _HEAD_TURN_YAW_THRESHOLD
+            deviation = abs(yaw)
+
+        if threshold <= 0:
+            return 1.0
+        # How far past the threshold: at threshold → 0.5, at 2× threshold → 1.0
+        return min(1.0, max(0.0, abs(deviation) / (threshold * 2)))
+
+    def _update_violation_state(self, vtype: str, is_active: bool, now: float,
+                                confidence: float = 0.0) -> None:
         vs = self._violations[vtype]
         if is_active and not vs["active"]:
             vs["active"] = True
             vs["start"] = now
-            logger.info("Gaze: %s started", vtype)
+            vs["confidence"] = confidence
+            logger.info("Gaze: %s started (conf=%.2f)", vtype, confidence)
+        elif is_active and vs["active"]:
+            # Update confidence while the violation is active
+            vs["confidence"] = confidence
         elif not is_active and vs["active"]:
             logger.info(
                 "Gaze: %s ended (duration=%.1fs)",
@@ -225,19 +293,38 @@ class GazeService:
             )
             vs["active"] = False
             vs["start"] = None
+            vs["confidence"] = 0.0
 
     def _clear_violations(self) -> None:
         for vtype in self._violations:
             self._violations[vtype]["active"] = False
             self._violations[vtype]["start"] = None
+            self._violations[vtype]["confidence"] = 0.0
 
     def _build_result(self) -> dict:
         yaw = self._current_features.get("yaw") if self._current_features else None
+        pitch = self._current_features.get("pitch") if self._current_features else None
+
+        # Simple directional states, reported independently: the eyes can look
+        # in one direction while the head remains centered.
+        head_dir = "not_detected"
+        eye_dir = "not_detected"
+        if self._face_detected and self._current_features is not None:
+            head_dir = head_direction(yaw, pitch)
+            eye_dir = zone_to_direction(self._last_raw_point)
 
         now = time.time()
         active_violations = sorted(
             vtype for vtype, vs in self._violations.items() if vs["active"]
         )
+
+        # Per-violation confidence: the actual strength of each active violation
+        # (yaw deviation ratio for HEAD_TURN, away-vote fraction for GAZE_AWAY).
+        violation_confidences: dict[str, float] = {
+            vtype: round(float(vs["confidence"]), 4)
+            for vtype, vs in self._violations.items()
+            if vs["active"]
+        }
 
         status = "normal"
         violation_active = False
@@ -248,7 +335,7 @@ class GazeService:
             if vs["active"] and vs["start"] is not None:
                 violation_active = True
                 violation_type = vtype
-                violation_duration = round(now - vs["start"], 2)
+                violation_duration = round(float(now - vs["start"]), 2)
                 status = vtype.lower()
                 break
 
@@ -256,9 +343,13 @@ class GazeService:
             "face_detected": self._face_detected,
             "status": status,
             "predicted_point": self._smoothed_point,
-            "confidence": round(self._smoothed_confidence, 4),
-            "yaw": round(yaw, 2) if yaw is not None else None,
+            "confidence": round(float(self._smoothed_confidence), 4),
+            "yaw": round(float(yaw), 2) if yaw is not None else None,
+            "pitch": round(float(pitch), 2) if pitch is not None else None,
+            "head_direction": head_dir,
+            "eye_direction": eye_dir,
             "active_violations": active_violations,
+            "violation_confidences": violation_confidences,
             "violation_active": violation_active,
             "violation_type": violation_type,
             "violation_duration": violation_duration,

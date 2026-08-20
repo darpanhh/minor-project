@@ -24,6 +24,7 @@ from app.proctoring.gaze.landmarks import (  # noqa: E402
     RIGHT_EYE_LEFT, RIGHT_EYE_RIGHT, LEFT_UPPER, LEFT_LOWER,
     RIGHT_UPPER, RIGHT_LOWER,
 )
+from app.proctoring.ws_proctor import SNAPSHOT_COOLDOWN  # noqa: E402
 
 
 class _Lm:
@@ -62,10 +63,13 @@ def _project_face(yaw_deg: float, w: int = 640, h: int = 480) -> list[_Lm]:
     coords[LEFT_LOWER] = (0.415, 0.435)
     coords[RIGHT_UPPER] = (0.585, 0.41)
     coords[RIGHT_LOWER] = (0.585, 0.435)
+    # When the head is strongly turned, the eyes cannot stay on screen — they
+    # shift with the turn (positive yaw = turned right → iris drifts image-left).
+    iris_shift = -0.15 if yaw_deg > 30 else (0.15 if yaw_deg < -30 else 0.0)
     for i in LEFT_IRIS:
-        coords[i] = (0.415, 0.4225)
+        coords[i] = (0.415 + iris_shift, 0.4225)
     for i in RIGHT_IRIS:
-        coords[i] = (0.585, 0.4225)
+        coords[i] = (0.585 + iris_shift, 0.4225)
 
     landmarks = [_Lm(0.5, 0.5) for _ in range(478)]
     for idx, (x, y) in coords.items():
@@ -147,7 +151,7 @@ def test_snapshot_cooldown_is_per_type_and_starts_on_snapshot():
     # Mirrors the ws_proctor confirm loop: cooldown for a type starts only when
     # a snapshot for that type is taken; a cooling-down type still gets its
     # event but without a snapshot, and without resetting its cooldown.
-    cooldown = 5.0
+    cooldown = SNAPSHOT_COOLDOWN
     last_snapshot_at = {}
 
     def needs_snapshot(reason, now):
